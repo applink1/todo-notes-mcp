@@ -1,12 +1,10 @@
 {
   "name": "todo-notes-mcp",
   "version": "1.0.0",
-  "description": "Todo & Notes MCP Server for ChatGPT App Marketplace",
-  "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "18.x"
   }
 }
