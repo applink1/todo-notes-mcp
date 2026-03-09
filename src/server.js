@@ -91,30 +91,45 @@ const server = http.createServer(async (req, res) => {
   try { pathname = new URL(req.url, 'http://x').pathname; } catch(_) {}
   const accept = req.headers['accept'] || '';
 
-  // Health
   if (pathname === '/health') {
     return sendJSON(res, 200, { status: 'ok', uptime: process.uptime() });
   }
 
-  // SSE — ChatGPT connects here first
+  // ── SSE endpoint — ChatGPT connects here
   if (req.method === 'GET' && pathname === '/' && accept.includes('text/event-stream')) {
     const sid = uid();
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no',
-      'Mcp-Session-Id': sid,
-    });
     const proto = req.headers['x-forwarded-proto'] || 'https';
     const host  = req.headers['x-forwarded-host']  || req.headers['host'] || 'localhost';
-    res.write('event: endpoint\ndata: ' + JSON.stringify({ uri: proto + '://' + host + '/message?sessionId=' + sid }) + '\n\n');
-    const t = setInterval(() => { try { res.write(': ping\n\n'); } catch(_) {} }, 20000);
+    const base  = proto + '://' + host;
+
+    res.writeHead(200, {
+      'Content-Type':     'text/event-stream',
+      'Cache-Control':    'no-cache, no-transform',
+      'Connection':       'keep-alive',
+      'X-Accel-Buffering':'no',        // kill nginx buffering
+      'Transfer-Encoding':'chunked',
+      'Mcp-Session-Id':   sid,
+    });
+
+    // Flush the headers immediately
+    res.flushHeaders();
+
+    // 1) Send a filler comment right away so the TCP connection is confirmed open
+    res.write(': connected\n\n');
+
+    // 2) Send the endpoint event — this is what ChatGPT is waiting for
+    res.write('event: endpoint\ndata: ' + JSON.stringify({ uri: base + '/message?sessionId=' + sid }) + '\n\n');
+
+    // 3) Keep-alive comment every 5 seconds (Railway drops idle streams fast)
+    const t = setInterval(() => {
+      try { res.write(': ping\n\n'); } catch(_) { clearInterval(t); }
+    }, 5000);
+
     req.on('close', () => clearInterval(t));
     return;
   }
 
-  // JSON-RPC
+  // ── JSON-RPC message endpoint
   if (req.method === 'POST' && pathname === '/message') {
     let body;
     try { body = await readJSON(req); } catch(e) {
@@ -125,7 +140,9 @@ const server = http.createServer(async (req, res) => {
     let result, error;
     try {
       switch (method) {
-        case 'initialize': result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'todo-notes-mcp', version: '1.0.0' } }; break;
+        case 'initialize':
+          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'todo-notes-mcp', version: '1.0.0' } };
+          break;
         case 'ping': result = {}; break;
         case 'tools/list': result = { tools: TOOLS }; break;
         case 'tools/call': {
@@ -140,23 +157,25 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(res, 200, error ? { jsonrpc: '2.0', id, error } : { jsonrpc: '2.0', id, result });
   }
 
-  // Browser page
+  // ── Browser status page
   if (req.method === 'GET' && pathname === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    return res.end(`<!DOCTYPE html><html><head><title>Todo & Notes MCP</title>
+    return res.end(`<!DOCTYPE html><html><head><title>Todo MCP</title>
 <style>body{background:#0c0c0f;color:#c8f060;font-family:monospace;padding:48px;line-height:2}
 code{background:#1a1a22;color:#60d0f0;padding:2px 8px;border-radius:4px}a{color:#60d0f0}</style></head>
-<body><h1>&#10003; Todo &amp; Notes MCP Server</h1>
+<body><h1>&#10003; Todo &amp; Notes MCP</h1>
 <p style="color:#80e080">&#9679; Running &mdash; uptime ${Math.floor(process.uptime())}s</p>
-<p>SSE: <code>GET /</code> with Accept: text/event-stream</p>
+<p>SSE: <code>GET /</code> with <code>Accept: text/event-stream</code></p>
 <p>RPC: <code>POST /message</code></p>
-<p>Health: <a href="/health">/health</a></p>
-</body></html>`);
+<p><a href="/health">/health</a></p></body></html>`);
   }
 
   res.writeHead(404); res.end('Not found');
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log('[MCP] Listening on 0.0.0.0:' + PORT));
-server.on('error', err => { console.error('[MCP] Fatal:', err); process.exit(1); });
-process.on('uncaughtException', err => { console.error('[MCP] Uncaught:', err); process.exit(1); });
+// Increase keep-alive timeout beyond Railway's 60s proxy timeout
+server.keepAliveTimeout = 65000;
+server.headersTimeout   = 66000;
+
+server.listen(PORT, '0.0.0.0', () => console.log('[MCP] Ready on port ' + PORT));
+server.on('error', err => { console.error('[MCP] Error:', err); process.exit(1); });
