@@ -5,7 +5,14 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 
 let todos = [];
 let notes = [];
+let activityLog = []; // live activity feed
+
 const uid = () => crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+
+function logActivity(type, tool, summary, data) {
+  activityLog.unshift({ id: uid(), type, tool, summary, data, ts: new Date().toISOString() });
+  if (activityLog.length > 100) activityLog = activityLog.slice(0, 100);
+}
 
 const TOOLS = [
   { name: 'get_todos', description: 'List todos. Pass status=pending|completed|all to filter.', inputSchema: { type: 'object', properties: { status: { type: 'string', enum: ['all','pending','completed'] } } } },
@@ -23,40 +30,57 @@ function runTool(name, args) {
     case 'get_todos': {
       const s = args.status || 'all';
       const list = s === 'pending' ? todos.filter(t => !t.completed) : s === 'completed' ? todos.filter(t => t.completed) : todos;
+      logActivity('read', name, `Listed ${list.length} todos (filter: ${s})`, { count: list.length, filter: s });
       return { todos: list, count: list.length };
     }
     case 'create_todo': {
       const t = { id: uid(), title: String(args.title), completed: false, priority: args.priority || 'medium', dueDate: args.dueDate || null, createdAt: new Date().toISOString() };
-      todos.push(t); return { success: true, todo: t };
+      todos.push(t);
+      logActivity('write', name, `Created todo: "${t.title}"`, { title: t.title, priority: t.priority });
+      return { success: true, todo: t };
     }
     case 'update_todo': {
       const i = todos.findIndex(t => t.id === args.id);
       if (i < 0) throw new Error('Todo not found');
       const { id: _, ...rest } = args;
       todos[i] = { ...todos[i], ...rest, updatedAt: new Date().toISOString() };
+      const action = rest.completed ? `Marked complete: "${todos[i].title}"` : `Updated todo: "${todos[i].title}"`;
+      logActivity('write', name, action, { title: todos[i].title, completed: todos[i].completed });
       return { success: true, todo: todos[i] };
     }
     case 'delete_todo': {
       const i = todos.findIndex(t => t.id === args.id);
       if (i < 0) throw new Error('Todo not found');
-      todos.splice(i, 1); return { success: true };
+      const deleted = todos[i];
+      todos.splice(i, 1);
+      logActivity('delete', name, `Deleted todo: "${deleted.title}"`, { title: deleted.title });
+      return { success: true };
     }
-    case 'get_notes': return { notes, count: notes.length };
+    case 'get_notes': {
+      logActivity('read', name, `Listed ${notes.length} notes`, { count: notes.length });
+      return { notes, count: notes.length };
+    }
     case 'create_note': {
       const n = { id: uid(), title: String(args.title), content: String(args.content), tags: args.tags || [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-      notes.push(n); return { success: true, note: n };
+      notes.push(n);
+      logActivity('write', name, `Created note: "${n.title}"`, { title: n.title, tags: n.tags });
+      return { success: true, note: n };
     }
     case 'update_note': {
       const i = notes.findIndex(n => n.id === args.id);
       if (i < 0) throw new Error('Note not found');
       const { id: _, ...rest } = args;
       notes[i] = { ...notes[i], ...rest, updatedAt: new Date().toISOString() };
+      logActivity('write', name, `Updated note: "${notes[i].title}"`, { title: notes[i].title });
       return { success: true, note: notes[i] };
     }
     case 'delete_note': {
       const i = notes.findIndex(n => n.id === args.id);
       if (i < 0) throw new Error('Note not found');
-      notes.splice(i, 1); return { success: true };
+      const deleted = notes[i];
+      notes.splice(i, 1);
+      logActivity('delete', name, `Deleted note: "${deleted.title}"`, { title: deleted.title });
+      return { success: true };
     }
     default: throw new Error('Unknown tool: ' + name);
   }
@@ -78,10 +102,7 @@ function readJSON(req) {
   return new Promise((ok, fail) => {
     const chunks = [];
     req.on('data', c => chunks.push(c));
-    req.on('end', () => {
-      try { ok(JSON.parse(Buffer.concat(chunks).toString() || 'null')); }
-      catch(e) { fail(e); }
-    });
+    req.on('end', () => { try { ok(JSON.parse(Buffer.concat(chunks).toString() || 'null')); } catch(e) { fail(e); } });
     req.on('error', fail);
   });
 }
@@ -92,6 +113,7 @@ function handleRPC(msg, sessionId) {
   const { id, method, params = {} } = msg;
   if (method === 'initialize') {
     sessions.set(sessionId, { createdAt: Date.now() });
+    logActivity('connect', 'initialize', `Claude connected (session ${sessionId.slice(0,8)}…)`, { sessionId });
     return { id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'todo-notes-mcp', version: '1.0.0' } } };
   }
   if (method === 'notifications/initialized') return null;
@@ -102,6 +124,7 @@ function handleRPC(msg, sessionId) {
     try {
       return { id, result: { content: [{ type: 'text', text: JSON.stringify(runTool(name, args), null, 2) }] } };
     } catch(e) {
+      logActivity('error', name, `Error: ${e.message}`, {});
       return { id, result: { content: [{ type: 'text', text: 'Error: ' + e.message }], isError: true } };
     }
   }
@@ -119,75 +142,53 @@ const server = http.createServer(async (req, res) => {
   const proto = req.headers['x-forwarded-proto'] || 'https';
   const base = proto + '://' + host;
 
-  // ── Health
-  if (pathname === '/health') {
-    return json(res, 200, { status: 'ok', uptime: Math.floor(process.uptime()) });
+  if (pathname === '/health') return json(res, 200, { status: 'ok', uptime: Math.floor(process.uptime()), todos: todos.length, notes: notes.length });
+
+  // Dashboard data API
+  if (pathname === '/api/stats') {
+    return json(res, 200, {
+      todos: { total: todos.length, pending: todos.filter(t=>!t.completed).length, completed: todos.filter(t=>t.completed).length },
+      notes: { total: notes.length },
+      sessions: sessions.size,
+      uptime: Math.floor(process.uptime()),
+      activity: activityLog.slice(0, 20)
+    });
   }
 
-  // ── OAuth 2.0 Authorization Server Metadata (RFC 8414)
-  // ChatGPT App Marketplace requires this even for no-auth servers.
-  // We point all OAuth flows back to a dummy passthrough so no real auth happens.
+  if (pathname === '/api/todos') return json(res, 200, todos);
+  if (pathname === '/api/notes') return json(res, 200, notes);
+  if (pathname === '/api/activity') return json(res, 200, activityLog.slice(0, 50));
+
+  // OAuth endpoints
   if (pathname === '/.well-known/oauth-authorization-server') {
     return json(res, 200, {
-      issuer: base,
-      authorization_endpoint: base + '/oauth/authorize',
-      token_endpoint: base + '/oauth/token',
-      registration_endpoint: base + '/oauth/register',
-      response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code'],
-      code_challenge_methods_supported: ['S256'],
-      token_endpoint_auth_methods_supported: ['none']
+      issuer: base, authorization_endpoint: base + '/oauth/authorize',
+      token_endpoint: base + '/oauth/token', registration_endpoint: base + '/oauth/register',
+      response_types_supported: ['code'], grant_types_supported: ['authorization_code'],
+      code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none']
     });
   }
-
-  // ── OAuth Dynamic Client Registration (RFC 7591)
   if (req.method === 'POST' && pathname === '/oauth/register') {
-    let body = {};
-    try { body = await readJSON(req); } catch(_) {}
-    const clientId = uid();
-    return json(res, 201, {
-      client_id: clientId,
-      client_secret: uid(),
-      client_name: body.client_name || 'ChatGPT',
-      redirect_uris: body.redirect_uris || [],
-      grant_types: ['authorization_code'],
-      response_types: ['code'],
-      token_endpoint_auth_method: 'none'
-    });
+    let body = {}; try { body = await readJSON(req); } catch(_) {}
+    return json(res, 201, { client_id: uid(), client_secret: uid(), client_name: body.client_name || 'Client', redirect_uris: body.redirect_uris || [], grant_types: ['authorization_code'], response_types: ['code'], token_endpoint_auth_method: 'none' });
   }
-
-  // ── OAuth Authorize — redirect straight back with a code (no real auth)
   if (req.method === 'GET' && pathname === '/oauth/authorize') {
     const url = new URL(req.url, base);
     const redirectUri = url.searchParams.get('redirect_uri') || '';
     const state = url.searchParams.get('state') || '';
     const code = uid();
-    const redirect = redirectUri + (redirectUri.includes('?') ? '&' : '?') +
-      'code=' + encodeURIComponent(code) +
-      (state ? '&state=' + encodeURIComponent(state) : '');
-    res.writeHead(302, { Location: redirect });
-    return res.end();
+    const redirect = redirectUri + (redirectUri.includes('?') ? '&' : '?') + 'code=' + encodeURIComponent(code) + (state ? '&state=' + encodeURIComponent(state) : '');
+    res.writeHead(302, { Location: redirect }); return res.end();
   }
-
-  // ── OAuth Token — hand back a static token (no real auth)
   if (req.method === 'POST' && pathname === '/oauth/token') {
-    return json(res, 200, {
-      access_token: 'open-access-' + uid(),
-      token_type: 'bearer',
-      expires_in: 86400 * 365
-    });
+    return json(res, 200, { access_token: 'open-' + uid(), token_type: 'bearer', expires_in: 86400 * 365 });
   }
 
-  // ── MCP Streamable HTTP endpoint
+  // MCP endpoint
   if (req.method === 'POST' && pathname === '/mcp') {
-    let body;
-    try { body = await readJSON(req); } catch(e) {
-      return json(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
-    }
-
+    let body; try { body = await readJSON(req); } catch(e) { return json(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }); }
     let sessionId = req.headers['mcp-session-id'];
     if (!sessionId) { sessionId = uid(); res.setHeader('Mcp-Session-Id', sessionId); }
-
     const messages = Array.isArray(body) ? body : [body];
     const responses = [];
     for (const msg of messages) {
@@ -195,35 +196,27 @@ const server = http.createServer(async (req, res) => {
       const r = handleRPC(msg, sessionId);
       if (r) responses.push({ jsonrpc: '2.0', ...r });
     }
-
     if (responses.length === 0) { res.writeHead(204); return res.end(); }
     return json(res, 200, Array.isArray(body) ? responses : responses[0]);
   }
-
   if (req.method === 'DELETE' && pathname === '/mcp') {
-    const sid = req.headers['mcp-session-id'];
-    if (sid) sessions.delete(sid);
+    const sid = req.headers['mcp-session-id']; if (sid) sessions.delete(sid);
     res.writeHead(204); return res.end();
   }
+  if (req.method === 'GET' && pathname === '/mcp') return json(res, 200, { transport: 'streamable-http', protocolVersion: '2024-11-05' });
 
-  if (req.method === 'GET' && pathname === '/mcp') {
-    return json(res, 200, { transport: 'streamable-http', protocolVersion: '2024-11-05' });
-  }
-
-  // ── Browser status page
-  if (req.method === 'GET' && pathname === '/') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    return res.end(`<!DOCTYPE html><html><head><title>Todo MCP</title>
-<style>body{background:#0c0c0f;color:#c8f060;font-family:monospace;padding:48px;line-height:2}
-code{background:#1a1a22;color:#60d0f0;padding:2px 8px;border-radius:4px}a{color:#60d0f0}
-.ok{color:#80e080}.dim{color:#555}</style></head><body>
-<h1>&#10003; Todo &amp; Notes MCP</h1>
-<p class="ok">&#9679; Running &mdash; uptime ${Math.floor(process.uptime())}s</p>
-<p>MCP endpoint: <code>POST /mcp</code></p>
-<p>OAuth metadata: <code><a href="/.well-known/oauth-authorization-server">/.well-known/oauth-authorization-server</a></code></p>
-<p>Health: <a href="/health">/health</a></p>
-<p class="dim">Tools: get_todos · create_todo · update_todo · delete_todo · get_notes · create_note · update_note · delete_note</p>
-</body></html>`);
+  // Serve static files
+  if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
+    const fs = require('fs');
+    const path = require('path');
+    const filePath = path.join(__dirname, '..', 'public', 'index.html');
+    try {
+      const content = fs.readFileSync(filePath, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(content);
+    } catch(e) {
+      res.writeHead(404); return res.end('Not found');
+    }
   }
 
   res.writeHead(404); res.end('Not found');

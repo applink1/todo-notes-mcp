@@ -1,472 +1,424 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Todo & Notes — MCP Plugin</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Todo & Notes — MCP Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#090910;--surface:#0f0f18;--surface2:#141420;--border:#1e1e2e;
+  --accent:#c8f060;--accent2:#60d0f0;--accent3:#f060c8;
+  --text:#e2e2f0;--muted:#55556a;--danger:#f06060;--warn:#f0b060;
+  --radius:10px;
+}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;font-size:13px;min-height:100vh}
 
-    :root {
-      --bg: #0c0c0f;
-      --surface: #141418;
-      --border: #1f1f28;
-      --accent: #c8f060;
-      --accent2: #60d0f0;
-      --text: #e8e8ec;
-      --muted: #6b6b7a;
-      --danger: #f06060;
-      --radius: 10px;
-    }
+/* animated grid bg */
+body::before{content:'';position:fixed;inset:0;
+  background-image:linear-gradient(rgba(200,240,96,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(200,240,96,.025) 1px,transparent 1px);
+  background-size:48px 48px;pointer-events:none;z-index:0}
 
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: 'DM Mono', monospace;
-      font-size: 14px;
-      min-height: 100vh;
-      padding: 0;
-    }
+.layout{position:relative;z-index:1;display:grid;grid-template-columns:260px 1fr;min-height:100vh}
 
-    /* Grid background */
-    body::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      background-image:
-        linear-gradient(rgba(200,240,96,0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(200,240,96,0.03) 1px, transparent 1px);
-      background-size: 40px 40px;
-      pointer-events: none;
-      z-index: 0;
-    }
+/* ── Sidebar ── */
+.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:28px 20px;display:flex;flex-direction:column;gap:8px;position:sticky;top:0;height:100vh;overflow-y:auto}
+.brand{display:flex;align-items:center;gap:12px;padding:4px 0 24px}
+.brand-icon{width:38px;height:38px;background:var(--accent);border-radius:10px;display:grid;place-items:center;font-size:18px;color:#090910;font-weight:800;flex-shrink:0}
+.brand-name{font-family:'Syne',sans-serif;font-weight:800;font-size:16px;line-height:1.2}
+.brand-sub{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.8px}
+.nav-label{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);padding:16px 10px 6px;font-weight:600}
+.nav-btn{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;cursor:pointer;border:none;background:transparent;color:var(--muted);font-family:'DM Mono',monospace;font-size:12px;width:100%;text-align:left;transition:all .15s}
+.nav-btn:hover{background:var(--surface2);color:var(--text)}
+.nav-btn.active{background:rgba(200,240,96,.1);color:var(--accent);border:1px solid rgba(200,240,96,.15)}
+.nav-icon{font-size:14px;width:18px;text-align:center}
+.status-dot{width:7px;height:7px;border-radius:50%;background:#3a3a4a;margin-left:auto;transition:background .3s}
+.status-dot.live{background:var(--accent);box-shadow:0 0 6px var(--accent)}
 
-    .container {
-      position: relative;
-      z-index: 1;
-      max-width: 900px;
-      margin: 0 auto;
-      padding: 48px 24px;
-    }
+.stat-cards{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding-top:20px;border-top:1px solid var(--border)}
+.stat-card{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
+.stat-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.stat-value{font-family:'Syne',sans-serif;font-size:22px;font-weight:700;margin-top:2px}
+.stat-value.green{color:var(--accent)}
+.stat-value.blue{color:var(--accent2)}
 
-    header {
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      margin-bottom: 48px;
-      animation: fadeDown 0.6s ease both;
-    }
+/* ── Main ── */
+.main{padding:32px;overflow-y:auto;display:flex;flex-direction:column;gap:24px}
+.page{display:none;flex-direction:column;gap:20px}
+.page.active{display:flex;animation:fadeUp .25s ease both}
 
-    .logo-mark {
-      width: 48px; height: 48px;
-      background: var(--accent);
-      border-radius: 12px;
-      display: grid;
-      place-items: center;
-      font-family: 'Syne', sans-serif;
-      font-weight: 800;
-      font-size: 22px;
-      color: #0c0c0f;
-      flex-shrink: 0;
-    }
+.page-header{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.page-title{font-family:'Syne',sans-serif;font-weight:800;font-size:22px}
+.page-title span{color:var(--accent)}
+.btn{padding:9px 18px;border-radius:8px;border:none;cursor:pointer;font-family:'Syne',sans-serif;font-weight:600;font-size:12px;transition:all .15s;white-space:nowrap}
+.btn-primary{background:var(--accent);color:#090910}
+.btn-primary:hover{background:#d8ff70;transform:translateY(-1px)}
+.btn-ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
+.btn-danger{background:rgba(240,96,96,.12);color:var(--danger);border:1px solid rgba(240,96,96,.2)}
+.btn-danger:hover{background:rgba(240,96,96,.22)}
+.btn-done{background:rgba(96,208,240,.1);color:var(--accent2);border:1px solid rgba(96,208,240,.2)}
+.btn-done:hover{background:rgba(96,208,240,.2)}
+.btn-sm{padding:5px 12px;font-size:11px}
 
-    h1 {
-      font-family: 'Syne', sans-serif;
-      font-weight: 800;
-      font-size: clamp(24px, 5vw, 36px);
-      letter-spacing: -0.5px;
-    }
+/* Form */
+.form-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;display:flex;flex-direction:column;gap:12px}
+.form-row{display:flex;gap:10px}
+input,textarea,select{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 13px;font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border-color .2s;width:100%}
+input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+select{flex-shrink:0;width:auto;cursor:pointer}
+textarea{resize:vertical;min-height:80px;line-height:1.6}
+.form-actions{display:flex;justify-content:flex-end}
 
-    h1 span { color: var(--accent); }
+/* Cards */
+.cards{display:flex;flex-direction:column;gap:10px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;display:flex;align-items:flex-start;gap:14px;transition:border-color .2s,transform .15s;animation:fadeUp .2s ease both}
+.card:hover{border-color:#2a2a40;transform:translateY(-1px)}
+.card.done{opacity:.45}
+.card.done .card-title{text-decoration:line-through}
+.card-body{flex:1;min-width:0}
+.card-title{font-family:'Syne',sans-serif;font-weight:600;font-size:14px;margin-bottom:5px;line-height:1.4}
+.card-content{color:#888;font-size:12px;line-height:1.7;margin:6px 0}
+.card-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px}
+.card-actions{display:flex;gap:8px;flex-shrink:0}
+.pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+.pill-high{background:rgba(240,96,96,.15);color:#f09090}
+.pill-medium{background:rgba(240,176,60,.15);color:#f0c060}
+.pill-low{background:rgba(96,208,96,.15);color:#80e080}
+.tag{background:rgba(96,208,240,.1);color:var(--accent2);border:1px solid rgba(96,208,240,.15);padding:2px 8px;border-radius:4px;font-size:10px}
+.ts{color:var(--muted);font-size:10px}
 
-    .badge {
-      display: inline-block;
-      background: rgba(200,240,96,0.1);
-      color: var(--accent);
-      border: 1px solid rgba(200,240,96,0.2);
-      padding: 3px 10px;
-      border-radius: 99px;
-      font-size: 11px;
-      font-weight: 500;
-      letter-spacing: 0.5px;
-      text-transform: uppercase;
-    }
+.empty{text-align:center;padding:60px 20px;color:var(--muted);font-family:'Syne',sans-serif}
+.empty-icon{font-size:36px;margin-bottom:12px;opacity:.3}
 
-    .tabs {
-      display: flex;
-      gap: 4px;
-      margin-bottom: 24px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 4px;
-      width: fit-content;
-      animation: fadeDown 0.6s 0.1s ease both;
-    }
+/* Activity feed */
+.feed{display:flex;flex-direction:column;gap:0}
+.feed-item{display:flex;align-items:flex-start;gap:14px;padding:12px 0;border-bottom:1px solid var(--border);animation:fadeIn .3s ease both}
+.feed-item:last-child{border-bottom:none}
+.feed-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:4px}
+.dot-read{background:var(--accent2)}
+.dot-write{background:var(--accent)}
+.dot-delete{background:var(--danger)}
+.dot-connect{background:var(--accent3)}
+.dot-error{background:var(--warn)}
+.feed-body{flex:1}
+.feed-tool{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+.feed-summary{font-size:12px;color:var(--text);line-height:1.5}
+.feed-ts{font-size:10px;color:var(--muted);margin-top:2px}
+.feed-empty{padding:40px 0;text-align:center;color:var(--muted);font-family:'Syne',sans-serif}
 
-    .tab {
-      padding: 8px 20px;
-      border-radius: 7px;
-      cursor: pointer;
-      font-family: 'Syne', sans-serif;
-      font-weight: 600;
-      font-size: 13px;
-      border: none;
-      background: transparent;
-      color: var(--muted);
-      transition: all 0.2s;
-    }
+/* Overview stats */
+.overview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.ov-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+.ov-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px}
+.ov-val{font-family:'Syne',sans-serif;font-size:32px;font-weight:800}
+.ov-val.g{color:var(--accent)}
+.ov-val.b{color:var(--accent2)}
+.ov-val.p{color:var(--accent3)}
+.ov-val.r{color:var(--danger)}
+.ov-sub{font-size:10px;color:var(--muted);margin-top:4px}
 
-    .tab.active {
-      background: var(--accent);
-      color: #0c0c0f;
-    }
+.section-title{font-family:'Syne',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:12px}
 
-    .panel { display: none; animation: fadeUp 0.3s ease both; }
-    .panel.active { display: block; }
+.pulse{animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
 
-    .input-row {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 20px;
-      animation: fadeDown 0.6s 0.2s ease both;
-    }
-
-    input[type="text"], textarea, select {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      color: var(--text);
-      border-radius: var(--radius);
-      padding: 10px 14px;
-      font-family: 'DM Mono', monospace;
-      font-size: 13px;
-      outline: none;
-      transition: border-color 0.2s;
-      width: 100%;
-    }
-
-    input:focus, textarea:focus, select:focus {
-      border-color: var(--accent);
-    }
-
-    select { flex-shrink: 0; width: auto; }
-    textarea { resize: vertical; min-height: 80px; }
-
-    .btn {
-      padding: 10px 20px;
-      border-radius: var(--radius);
-      border: none;
-      cursor: pointer;
-      font-family: 'Syne', sans-serif;
-      font-weight: 600;
-      font-size: 13px;
-      transition: all 0.15s;
-      white-space: nowrap;
-    }
-
-    .btn-primary {
-      background: var(--accent);
-      color: #0c0c0f;
-    }
-
-    .btn-primary:hover { background: #d9ff70; transform: translateY(-1px); }
-    .btn-danger { background: rgba(240,96,96,0.15); color: var(--danger); border: 1px solid rgba(240,96,96,0.2); }
-    .btn-danger:hover { background: rgba(240,96,96,0.25); }
-    .btn-complete { background: rgba(96,208,240,0.12); color: var(--accent2); border: 1px solid rgba(96,208,240,0.2); }
-    .btn-complete:hover { background: rgba(96,208,240,0.22); }
-
-    .list { display: flex; flex-direction: column; gap: 10px; }
-
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 16px 20px;
-      display: flex;
-      align-items: flex-start;
-      gap: 14px;
-      transition: border-color 0.2s, transform 0.15s;
-      animation: fadeUp 0.3s ease both;
-    }
-
-    .card:hover { border-color: #2a2a38; transform: translateY(-1px); }
-    .card.done { opacity: 0.5; }
-    .card.done .card-title { text-decoration: line-through; }
-
-    .card-body { flex: 1; min-width: 0; }
-    .card-title { font-family: 'Syne', sans-serif; font-weight: 600; font-size: 15px; margin-bottom: 4px; }
-    .card-meta { color: var(--muted); font-size: 11px; display: flex; gap: 10px; flex-wrap: wrap; }
-
-    .priority {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 10px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .priority-high { background: rgba(240,96,96,0.15); color: #f09090; }
-    .priority-medium { background: rgba(240,180,60,0.15); color: #f0c060; }
-    .priority-low { background: rgba(96,208,96,0.15); color: #80e080; }
-
-    .tag {
-      display: inline-block;
-      background: rgba(96,208,240,0.1);
-      color: var(--accent2);
-      border: 1px solid rgba(96,208,240,0.15);
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 11px;
-    }
-
-    .card-actions { display: flex; gap: 8px; flex-shrink: 0; }
-
-    .empty {
-      text-align: center;
-      padding: 60px 20px;
-      color: var(--muted);
-      font-family: 'Syne', sans-serif;
-    }
-    .empty .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.4; }
-
-    .endpoints {
-      margin-top: 48px;
-      padding: 24px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      animation: fadeUp 0.6s 0.3s ease both;
-    }
-
-    .endpoints h3 {
-      font-family: 'Syne', sans-serif;
-      font-weight: 700;
-      margin-bottom: 16px;
-      color: var(--muted);
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-    }
-
-    .endpoint-row {
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      padding: 8px 0;
-      border-bottom: 1px solid var(--border);
-    }
-    .endpoint-row:last-child { border-bottom: none; }
-
-    .method {
-      font-size: 11px;
-      font-weight: 700;
-      padding: 3px 8px;
-      border-radius: 4px;
-      min-width: 52px;
-      text-align: center;
-    }
-    .GET { background: rgba(96,208,96,0.12); color: #80e080; }
-    .POST { background: rgba(96,208,240,0.12); color: var(--accent2); }
-    .PATCH { background: rgba(240,180,60,0.12); color: #f0c060; }
-    .DELETE { background: rgba(240,96,96,0.12); color: var(--danger); }
-
-    .path { color: var(--text); flex: 1; }
-    .desc { color: var(--muted); font-size: 12px; }
-
-    @keyframes fadeDown {
-      from { opacity: 0; transform: translateY(-12px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(10px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-  </style>
+/* Scrollbar */
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+</style>
 </head>
 <body>
-<div class="container">
+<div class="layout">
 
-  <header>
-    <div class="logo-mark">✓</div>
+<!-- SIDEBAR -->
+<aside class="sidebar">
+  <div class="brand">
+    <div class="brand-icon">✓</div>
     <div>
-      <h1>Todo & <span>Notes</span></h1>
-      <span class="badge">MCP Plugin · Railway</span>
+      <div class="brand-name">Todo & Notes</div>
+      <div class="brand-sub">MCP Dashboard</div>
     </div>
-  </header>
-
-  <div class="tabs">
-    <button class="tab active" onclick="switchTab('todos')">Todos</button>
-    <button class="tab" onclick="switchTab('notes')">Notes</button>
   </div>
 
-  <!-- TODOS PANEL -->
-  <div id="panel-todos" class="panel active">
-    <div class="input-row">
-      <input type="text" id="todo-input" placeholder="Add a new todo..." onkeydown="if(event.key==='Enter') addTodo()" />
-      <select id="todo-priority">
-        <option value="medium">Medium</option>
-        <option value="high">High</option>
-        <option value="low">Low</option>
-      </select>
-      <button class="btn btn-primary" onclick="addTodo()">Add</button>
+  <span class="nav-label">Views</span>
+  <button class="nav-btn active" onclick="goto('overview')"><span class="nav-icon">⬡</span> Overview <span class="status-dot live" id="dot-overview"></span></button>
+  <button class="nav-btn" onclick="goto('activity')"><span class="nav-icon">◎</span> Live Activity <span class="status-dot" id="dot-activity"></span></button>
+
+  <span class="nav-label">Data</span>
+  <button class="nav-btn" onclick="goto('todos')"><span class="nav-icon">☑</span> Todos</button>
+  <button class="nav-btn" onclick="goto('notes')"><span class="nav-icon">◈</span> Notes</button>
+
+  <div class="stat-cards">
+    <div class="stat-card">
+      <div class="stat-label">Todos</div>
+      <div class="stat-value green" id="sb-todos">–</div>
     </div>
-    <div class="list" id="todo-list"></div>
+    <div class="stat-card">
+      <div class="stat-label">Notes</div>
+      <div class="stat-value blue" id="sb-notes">–</div>
+    </div>
+  </div>
+</aside>
+
+<!-- MAIN -->
+<main class="main">
+
+  <!-- OVERVIEW -->
+  <div id="page-overview" class="page active">
+    <div class="page-header">
+      <div class="page-title">Overview <span>↗</span></div>
+      <button class="btn btn-ghost" onclick="refresh()">↻ Refresh</button>
+    </div>
+    <div class="overview-grid">
+      <div class="ov-card"><div class="ov-label">Total Todos</div><div class="ov-val g" id="ov-total-todos">–</div><div class="ov-sub">all time</div></div>
+      <div class="ov-card"><div class="ov-label">Pending</div><div class="ov-val b" id="ov-pending">–</div><div class="ov-sub">not done yet</div></div>
+      <div class="ov-card"><div class="ov-label">Completed</div><div class="ov-val p" id="ov-completed">–</div><div class="ov-sub">well done</div></div>
+      <div class="ov-card"><div class="ov-label">Notes</div><div class="ov-val g" id="ov-notes">–</div><div class="ov-sub">saved</div></div>
+      <div class="ov-card"><div class="ov-label">MCP Sessions</div><div class="ov-val b" id="ov-sessions">–</div><div class="ov-sub">Claude connections</div></div>
+      <div class="ov-card"><div class="ov-label">Uptime</div><div class="ov-val" id="ov-uptime" style="font-size:20px">–</div><div class="ov-sub">server running</div></div>
+    </div>
+    <div>
+      <div class="section-title">Recent Activity</div>
+      <div class="feed" id="overview-feed"><div class="feed-empty">No activity yet — ask Claude to manage your todos!</div></div>
+    </div>
   </div>
 
-  <!-- NOTES PANEL -->
-  <div id="panel-notes" class="panel">
-    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px;animation:fadeDown 0.4s ease both;">
-      <input type="text" id="note-title" placeholder="Note title..." />
-      <textarea id="note-content" placeholder="Write your note..."></textarea>
-      <input type="text" id="note-tags" placeholder="Tags (comma separated, optional)" />
-      <div style="display:flex;justify-content:flex-end;">
-        <button class="btn btn-primary" onclick="addNote()">Save Note</button>
+  <!-- ACTIVITY -->
+  <div id="page-activity" class="page">
+    <div class="page-header">
+      <div class="page-title">Live <span>Activity</span></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="color:var(--accent);font-size:11px" class="pulse" id="live-indicator">● LIVE</span>
+        <button class="btn btn-ghost" onclick="loadActivity()">↻ Refresh</button>
       </div>
     </div>
-    <div class="list" id="note-list"></div>
+    <div class="feed" id="activity-feed"><div class="feed-empty pulse">Waiting for Claude to call your MCP tools…</div></div>
   </div>
 
-  <!-- API ENDPOINTS -->
-  <div class="endpoints">
-    <h3>API Endpoints</h3>
-    <div class="endpoint-row"><span class="method GET">GET</span><span class="path">/todos</span><span class="desc">List all todos</span></div>
-    <div class="endpoint-row"><span class="method POST">POST</span><span class="path">/todos</span><span class="desc">Create todo</span></div>
-    <div class="endpoint-row"><span class="method PATCH">PATCH</span><span class="path">/todos/:id</span><span class="desc">Update / complete todo</span></div>
-    <div class="endpoint-row"><span class="method DELETE">DELETE</span><span class="path">/todos/:id</span><span class="desc">Delete todo</span></div>
-    <div class="endpoint-row"><span class="method GET">GET</span><span class="path">/notes</span><span class="desc">List all notes</span></div>
-    <div class="endpoint-row"><span class="method POST">POST</span><span class="path">/notes</span><span class="desc">Create note</span></div>
-    <div class="endpoint-row"><span class="method PATCH">PATCH</span><span class="path">/notes/:id</span><span class="desc">Update note</span></div>
-    <div class="endpoint-row"><span class="method DELETE">DELETE</span><span class="path">/notes/:id</span><span class="desc">Delete note</span></div>
-    <div class="endpoint-row"><span class="method GET">GET</span><span class="path">/.well-known/ai-plugin.json</span><span class="desc">Plugin manifest</span></div>
-    <div class="endpoint-row"><span class="method GET">GET</span><span class="path">/openapi.yaml</span><span class="desc">OpenAPI spec for ChatGPT</span></div>
+  <!-- TODOS -->
+  <div id="page-todos" class="page">
+    <div class="page-header">
+      <div class="page-title">Todos</div>
+    </div>
+    <div class="form-card">
+      <div class="form-row">
+        <input id="todo-title" placeholder="What needs to be done?" onkeydown="if(event.key==='Enter')addTodo()"/>
+        <select id="todo-priority"><option value="medium">Medium</option><option value="high">High</option><option value="low">Low</option></select>
+        <button class="btn btn-primary" onclick="addTodo()">Add</button>
+      </div>
+    </div>
+    <div class="cards" id="todo-list"></div>
   </div>
 
+  <!-- NOTES -->
+  <div id="page-notes" class="page">
+    <div class="page-header">
+      <div class="page-title">Notes</div>
+    </div>
+    <div class="form-card">
+      <input id="note-title" placeholder="Note title…"/>
+      <textarea id="note-content" placeholder="Write your note…"></textarea>
+      <input id="note-tags" placeholder="Tags (comma separated, optional)"/>
+      <div class="form-actions"><button class="btn btn-primary" onclick="addNote()">Save Note</button></div>
+    </div>
+    <div class="cards" id="note-list"></div>
+  </div>
+
+</main>
 </div>
 
 <script>
-  const API = '';  // same origin
-  let currentTab = 'todos';
+const API = '';
+let currentPage = 'overview';
+let autoRefresh;
 
-  function switchTab(tab) {
-    currentTab = tab;
-    document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', ['todos','notes'][i] === tab));
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-    document.getElementById('panel-' + tab).classList.add('active');
-    tab === 'todos' ? loadTodos() : loadNotes();
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+function goto(page) {
+  currentPage = page;
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('page-'+page).classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.trim().toLowerCase().startsWith(page)||b.onclick.toString().includes("'"+page+"'"))b.classList.add('active')});
+  if(page==='overview') { loadStats(); loadActivity(); }
+  if(page==='activity') loadActivity();
+  if(page==='todos') loadTodos();
+  if(page==='notes') loadNotes();
+}
+
+function fmtUptime(s){
+  if(s<60) return s+'s';
+  if(s<3600) return Math.floor(s/60)+'m '+Math.floor(s%60)+'s';
+  return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+}
+
+function fmtTs(ts){
+  const d=new Date(ts), now=new Date();
+  const diff=Math.floor((now-d)/1000);
+  if(diff<5) return 'just now';
+  if(diff<60) return diff+'s ago';
+  if(diff<3600) return Math.floor(diff/60)+'m ago';
+  return d.toLocaleTimeString();
+}
+
+function dotClass(type){return{read:'dot-read',write:'dot-write',delete:'dot-delete',connect:'dot-connect',error:'dot-error'}[type]||'dot-read'}
+
+function renderFeedItems(items, limit=10) {
+  if(!items||!items.length) return '<div class="feed-empty">No activity yet — ask Claude to manage your todos!</div>';
+  return items.slice(0,limit).map(a=>`
+    <div class="feed-item">
+      <div class="feed-dot ${dotClass(a.type)}"></div>
+      <div class="feed-body">
+        <div class="feed-tool">${esc(a.tool)}</div>
+        <div class="feed-summary">${esc(a.summary)}</div>
+        <div class="feed-ts">${fmtTs(a.ts)}</div>
+      </div>
+    </div>`).join('');
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch(API+'/api/stats');
+    const s = await r.json();
+    document.getElementById('ov-total-todos').textContent = s.todos.total;
+    document.getElementById('ov-pending').textContent = s.todos.pending;
+    document.getElementById('ov-completed').textContent = s.todos.completed;
+    document.getElementById('ov-notes').textContent = s.notes.total;
+    document.getElementById('ov-sessions').textContent = s.sessions;
+    document.getElementById('ov-uptime').textContent = fmtUptime(s.uptime);
+    document.getElementById('sb-todos').textContent = s.todos.total;
+    document.getElementById('sb-notes').textContent = s.notes.total;
+    document.getElementById('overview-feed').innerHTML = renderFeedItems(s.activity, 8);
+    document.getElementById('dot-overview').classList.add('live');
+  } catch(e) {
+    document.getElementById('dot-overview').classList.remove('live');
   }
+}
 
-  // ── TODOS ──
-  async function loadTodos() {
-    const res = await fetch(API + '/todos');
-    const todos = await res.json();
-    const list = document.getElementById('todo-list');
-    if (!todos.length) {
-      list.innerHTML = '<div class="empty"><div class="icon">☑</div>No todos yet. Add one above!</div>';
-      return;
-    }
-    list.innerHTML = todos.map(t => `
-      <div class="card ${t.completed ? 'done' : ''}">
-        <div class="card-body">
-          <div class="card-title">${esc(t.title)}</div>
-          <div class="card-meta">
-            <span class="priority priority-${t.priority}">${t.priority}</span>
-            ${t.dueDate ? `<span>Due: ${t.dueDate}</span>` : ''}
-            <span>${new Date(t.createdAt).toLocaleDateString()}</span>
-          </div>
-        </div>
-        <div class="card-actions">
-          ${!t.completed ? `<button class="btn btn-complete" onclick="completeTodo('${t.id}')">✓ Done</button>` : ''}
-          <button class="btn btn-danger" onclick="deleteTodo('${t.id}')">✕</button>
+async function loadActivity() {
+  try {
+    const r = await fetch(API+'/api/activity');
+    const items = await r.json();
+    const el = document.getElementById('activity-feed');
+    el.innerHTML = items.length ? renderFeedItems(items, 50) : '<div class="feed-empty pulse">Waiting for Claude to call your MCP tools…</div>';
+    document.getElementById('dot-activity').classList.toggle('live', items.length>0);
+  } catch(e) {}
+}
+
+async function refresh() { await loadStats(); await loadActivity(); }
+
+// ── TODOS ──
+async function loadTodos() {
+  const r = await fetch(API+'/api/todos');
+  const todos = await r.json();
+  const el = document.getElementById('todo-list');
+  if(!todos.length){el.innerHTML='<div class="empty"><div class="empty-icon">☑</div>No todos yet. Add one above or ask Claude!</div>';return;}
+  el.innerHTML = todos.map(t=>`
+    <div class="card ${t.completed?'done':''}">
+      <div class="card-body">
+        <div class="card-title">${esc(t.title)}</div>
+        <div class="card-meta">
+          <span class="pill pill-${t.priority}">${t.priority}</span>
+          ${t.dueDate?`<span class="ts">Due: ${esc(t.dueDate)}</span>`:''}
+          <span class="ts">${new Date(t.createdAt).toLocaleDateString()}</span>
         </div>
       </div>
-    `).join('');
-  }
-
-  async function addTodo() {
-    const input = document.getElementById('todo-input');
-    const title = input.value.trim();
-    const priority = document.getElementById('todo-priority').value;
-    if (!title) return;
-    await fetch(API + '/todos', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, priority })
-    });
-    input.value = '';
-    loadTodos();
-  }
-
-  async function completeTodo(id) {
-    await fetch(API + '/todos/' + id, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ completed: true })
-    });
-    loadTodos();
-  }
-
-  async function deleteTodo(id) {
-    await fetch(API + '/todos/' + id, { method: 'DELETE' });
-    loadTodos();
-  }
-
-  // ── NOTES ──
-  async function loadNotes() {
-    const res = await fetch(API + '/notes');
-    const notes = await res.json();
-    const list = document.getElementById('note-list');
-    if (!notes.length) {
-      list.innerHTML = '<div class="empty"><div class="icon">📝</div>No notes yet. Write one above!</div>';
-      return;
-    }
-    list.innerHTML = notes.map(n => `
-      <div class="card">
-        <div class="card-body">
-          <div class="card-title">${esc(n.title)}</div>
-          <div style="color:#aaa;font-size:13px;margin:8px 0;line-height:1.6;">${esc(n.content)}</div>
-          <div class="card-meta">
-            ${n.tags.map(tag => `<span class="tag">#${esc(tag)}</span>`).join('')}
-            <span>${new Date(n.createdAt).toLocaleDateString()}</span>
-          </div>
-        </div>
-        <div class="card-actions">
-          <button class="btn btn-danger" onclick="deleteNote('${n.id}')">✕</button>
-        </div>
+      <div class="card-actions">
+        ${!t.completed?`<button class="btn btn-done btn-sm" onclick="completeTodo('${t.id}')">✓ Done</button>`:''}
+        <button class="btn btn-danger btn-sm" onclick="deleteTodo('${t.id}')">✕</button>
       </div>
-    `).join('');
-  }
+    </div>`).join('');
+}
 
-  async function addNote() {
-    const title = document.getElementById('note-title').value.trim();
-    const content = document.getElementById('note-content').value.trim();
-    const tagsRaw = document.getElementById('note-tags').value.trim();
-    const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
-    if (!title || !content) return alert('Title and content are required.');
-    await fetch(API + '/notes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, content, tags })
-    });
-    document.getElementById('note-title').value = '';
-    document.getElementById('note-content').value = '';
-    document.getElementById('note-tags').value = '';
-    loadNotes();
-  }
-
-  async function deleteNote(id) {
-    await fetch(API + '/notes/' + id, { method: 'DELETE' });
-    loadNotes();
-  }
-
-  function esc(str) {
-    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-
-  // Init
+async function addTodo(){
+  const title=document.getElementById('todo-title').value.trim();
+  const priority=document.getElementById('todo-priority').value;
+  if(!title)return;
+  await callMCP('create_todo',{title,priority});
+  document.getElementById('todo-title').value='';
   loadTodos();
+}
+
+async function completeTodo(id){
+  await callMCP('update_todo',{id,completed:true});
+  loadTodos();
+}
+
+async function deleteTodo(id){
+  await callMCP('delete_todo',{id});
+  loadTodos();
+}
+
+// ── NOTES ──
+async function loadNotes(){
+  const r=await fetch(API+'/api/notes');
+  const notes=await r.json();
+  const el=document.getElementById('note-list');
+  if(!notes.length){el.innerHTML='<div class="empty"><div class="empty-icon">◈</div>No notes yet. Write one above or ask Claude!</div>';return;}
+  el.innerHTML=notes.map(n=>`
+    <div class="card">
+      <div class="card-body">
+        <div class="card-title">${esc(n.title)}</div>
+        <div class="card-content">${esc(n.content)}</div>
+        <div class="card-meta">
+          ${(n.tags||[]).map(tag=>`<span class="tag">#${esc(tag)}</span>`).join('')}
+          <span class="ts">${new Date(n.createdAt).toLocaleDateString()}</span>
+        </div>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-danger btn-sm" onclick="deleteNote('${n.id}')">✕</button>
+      </div>
+    </div>`).join('');
+}
+
+async function addNote(){
+  const title=document.getElementById('note-title').value.trim();
+  const content=document.getElementById('note-content').value.trim();
+  const tagsRaw=document.getElementById('note-tags').value.trim();
+  const tags=tagsRaw?tagsRaw.split(',').map(t=>t.trim()).filter(Boolean):[];
+  if(!title||!content)return alert('Title and content required');
+  await callMCP('create_note',{title,content,tags});
+  document.getElementById('note-title').value='';
+  document.getElementById('note-content').value='';
+  document.getElementById('note-tags').value='';
+  loadNotes();
+}
+
+async function deleteNote(id){
+  await callMCP('delete_note',{id});
+  loadNotes();
+}
+
+// ── MCP JSON-RPC helper (calls our own server) ──
+async function callMCP(tool, args){
+  const r = await fetch(API+'/mcp',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:tool,arguments:args}})
+  });
+  return r.json();
+}
+
+// ── Auto-refresh ──
+function startAutoRefresh(){
+  clearInterval(autoRefresh);
+  autoRefresh = setInterval(()=>{
+    if(currentPage==='overview') loadStats();
+    if(currentPage==='activity') loadActivity();
+  }, 3000);
+}
+
+// Init
+loadStats();
+loadActivity();
+startAutoRefresh();
 </script>
 </body>
 </html>
