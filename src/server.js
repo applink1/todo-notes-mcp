@@ -10,7 +10,7 @@ const uid = () => crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(1
 const TOOLS = [
   { name: 'get_todos', description: 'List todos. Pass status=pending|completed|all to filter.', inputSchema: { type: 'object', properties: { status: { type: 'string', enum: ['all','pending','completed'] } } } },
   { name: 'create_todo', description: 'Add a new todo.', inputSchema: { type: 'object', required: ['title'], properties: { title: { type: 'string' }, priority: { type: 'string', enum: ['low','medium','high'] }, dueDate: { type: 'string' } } } },
-  { name: 'update_todo', description: 'Edit a todo or mark it complete. Needs the todo id.', inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'string' }, title: { type: 'string' }, completed: { type: 'boolean' }, priority: { type: 'string', enum: ['low','medium','high'] } } } },
+  { name: 'update_todo', description: 'Edit a todo or mark it complete. Needs the todo id from get_todos first.', inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'string' }, title: { type: 'string' }, completed: { type: 'boolean' }, priority: { type: 'string', enum: ['low','medium','high'] } } } },
   { name: 'delete_todo', description: 'Remove a todo by id.', inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } } },
   { name: 'get_notes', description: 'List all notes.', inputSchema: { type: 'object', properties: {} } },
   { name: 'create_note', description: 'Save a new note.', inputSchema: { type: 'object', required: ['title','content'], properties: { title: { type: 'string' }, content: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } } } } },
@@ -32,7 +32,7 @@ function runTool(name, args) {
     case 'update_todo': {
       const i = todos.findIndex(t => t.id === args.id);
       if (i < 0) throw new Error('Todo not found');
-      const { id: _x, ...rest } = args;
+      const { id: _, ...rest } = args;
       todos[i] = { ...todos[i], ...rest, updatedAt: new Date().toISOString() };
       return { success: true, todo: todos[i] };
     }
@@ -49,7 +49,7 @@ function runTool(name, args) {
     case 'update_note': {
       const i = notes.findIndex(n => n.id === args.id);
       if (i < 0) throw new Error('Note not found');
-      const { id: _x, ...rest } = args;
+      const { id: _, ...rest } = args;
       notes[i] = { ...notes[i], ...rest, updatedAt: new Date().toISOString() };
       return { success: true, note: notes[i] };
     }
@@ -62,14 +62,14 @@ function runTool(name, args) {
   }
 }
 
-function setCORS(res) {
+function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, Authorization, Mcp-Session-Id');
   res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
 }
 
-function sendJSON(res, code, obj) {
+function json(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(obj));
 }
@@ -78,83 +78,95 @@ function readJSON(req) {
   return new Promise((ok, fail) => {
     const chunks = [];
     req.on('data', c => chunks.push(c));
-    req.on('end', () => { try { ok(JSON.parse(Buffer.concat(chunks).toString() || '{}')); } catch(e) { fail(e); } });
+    req.on('end', () => { try { ok(JSON.parse(Buffer.concat(chunks).toString() || 'null')); } catch(e) { fail(e); } });
     req.on('error', fail);
   });
 }
 
+// In-memory session store for Streamable HTTP
+const sessions = new Map();
+
+function handleRPC(msg, sessionId) {
+  const { id, method, params = {} } = msg;
+
+  // Initialise creates a session
+  if (method === 'initialize') {
+    sessions.set(sessionId, { createdAt: Date.now() });
+    return { id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'todo-notes-mcp', version: '1.0.0' } } };
+  }
+  if (method === 'notifications/initialized') return null; // no response
+  if (method === 'ping') return { id, result: {} };
+  if (method === 'tools/list') return { id, result: { tools: TOOLS } };
+  if (method === 'tools/call') {
+    const { name, arguments: args = {} } = params;
+    try {
+      return { id, result: { content: [{ type: 'text', text: JSON.stringify(runTool(name, args), null, 2) }] } };
+    } catch(e) {
+      return { id, result: { content: [{ type: 'text', text: 'Error: ' + e.message }], isError: true } };
+    }
+  }
+  return { id, error: { code: -32601, message: 'Method not found: ' + method } };
+}
+
 const server = http.createServer(async (req, res) => {
-  setCORS(res);
+  cors(res);
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
   let pathname = '/';
   try { pathname = new URL(req.url, 'http://x').pathname; } catch(_) {}
-  const accept = req.headers['accept'] || '';
 
+  // ── Health
   if (pathname === '/health') {
-    return sendJSON(res, 200, { status: 'ok', uptime: process.uptime() });
+    return json(res, 200, { status: 'ok', uptime: Math.floor(process.uptime()), sessions: sessions.size });
   }
 
-  // ── SSE endpoint — ChatGPT connects here
-  if (req.method === 'GET' && pathname === '/' && accept.includes('text/event-stream')) {
-    const sid = uid();
-    const proto = req.headers['x-forwarded-proto'] || 'https';
-    const host  = req.headers['x-forwarded-host']  || req.headers['host'] || 'localhost';
-    const base  = proto + '://' + host;
-
-    res.writeHead(200, {
-      'Content-Type':     'text/event-stream',
-      'Cache-Control':    'no-cache, no-transform',
-      'Connection':       'keep-alive',
-      'X-Accel-Buffering':'no',        // kill nginx buffering
-      'Transfer-Encoding':'chunked',
-      'Mcp-Session-Id':   sid,
-    });
-
-    // Flush the headers immediately
-    res.flushHeaders();
-
-    // 1) Send a filler comment right away so the TCP connection is confirmed open
-    res.write(': connected\n\n');
-
-    // 2) Send the endpoint event — this is what ChatGPT is waiting for
-    res.write('event: endpoint\ndata: ' + JSON.stringify({ uri: base + '/message?sessionId=' + sid }) + '\n\n');
-
-    // 3) Keep-alive comment every 5 seconds (Railway drops idle streams fast)
-    const t = setInterval(() => {
-      try { res.write(': ping\n\n'); } catch(_) { clearInterval(t); }
-    }, 5000);
-
-    req.on('close', () => clearInterval(t));
-    return;
-  }
-
-  // ── JSON-RPC message endpoint
-  if (req.method === 'POST' && pathname === '/message') {
+  // ── MCP Streamable HTTP endpoint (POST /mcp)
+  // This is the modern MCP transport — no SSE, no persistent connection.
+  // ChatGPT POSTs JSON-RPC and gets JSON back immediately.
+  if (req.method === 'POST' && pathname === '/mcp') {
     let body;
     try { body = await readJSON(req); } catch(e) {
-      return sendJSON(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
+      return json(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
     }
-    const { id, method, params = {} } = body;
-    if (method === 'notifications/initialized') { res.writeHead(204); return res.end(); }
-    let result, error;
-    try {
-      switch (method) {
-        case 'initialize':
-          result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'todo-notes-mcp', version: '1.0.0' } };
-          break;
-        case 'ping': result = {}; break;
-        case 'tools/list': result = { tools: TOOLS }; break;
-        case 'tools/call': {
-          const { name, arguments: args = {} } = params;
-          try { result = { content: [{ type: 'text', text: JSON.stringify(runTool(name, args), null, 2) }] }; }
-          catch(e) { result = { content: [{ type: 'text', text: 'Error: ' + e.message }], isError: true }; }
-          break;
-        }
-        default: error = { code: -32601, message: 'Method not found: ' + method };
-      }
-    } catch(e) { error = { code: -32603, message: e.message }; }
-    return sendJSON(res, 200, error ? { jsonrpc: '2.0', id, error } : { jsonrpc: '2.0', id, result });
+
+    // Session management
+    let sessionId = req.headers['mcp-session-id'];
+    if (!sessionId) {
+      sessionId = uid();
+      res.setHeader('Mcp-Session-Id', sessionId);
+    }
+
+    // Accept single message or batch array
+    const messages = Array.isArray(body) ? body : [body];
+    const responses = [];
+
+    for (const msg of messages) {
+      if (!msg || msg.jsonrpc !== '2.0') continue;
+      const r = handleRPC(msg, sessionId);
+      if (r) responses.push({ jsonrpc: '2.0', ...r });
+    }
+
+    // If all messages were notifications (no responses), return 204
+    if (responses.length === 0) { res.writeHead(204); return res.end(); }
+
+    // Return single object or array depending on input
+    return json(res, 200, Array.isArray(body) ? responses : responses[0]);
+  }
+
+  // ── DELETE /mcp  (session termination)
+  if (req.method === 'DELETE' && pathname === '/mcp') {
+    const sid = req.headers['mcp-session-id'];
+    if (sid) sessions.delete(sid);
+    res.writeHead(204); return res.end();
+  }
+
+  // ── GET /mcp  (capability discovery — some clients check this)
+  if (req.method === 'GET' && pathname === '/mcp') {
+    return json(res, 200, {
+      transport: 'streamable-http',
+      protocolVersion: '2024-11-05',
+      capabilities: { tools: {} }
+    });
   }
 
   // ── Browser status page
@@ -162,20 +174,23 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(`<!DOCTYPE html><html><head><title>Todo MCP</title>
 <style>body{background:#0c0c0f;color:#c8f060;font-family:monospace;padding:48px;line-height:2}
-code{background:#1a1a22;color:#60d0f0;padding:2px 8px;border-radius:4px}a{color:#60d0f0}</style></head>
-<body><h1>&#10003; Todo &amp; Notes MCP</h1>
-<p style="color:#80e080">&#9679; Running &mdash; uptime ${Math.floor(process.uptime())}s</p>
-<p>SSE: <code>GET /</code> with <code>Accept: text/event-stream</code></p>
-<p>RPC: <code>POST /message</code></p>
-<p><a href="/health">/health</a></p></body></html>`);
+code{background:#1a1a22;color:#60d0f0;padding:2px 8px;border-radius:4px}a{color:#60d0f0}
+.ok{color:#80e080}</style></head><body>
+<h1>&#10003; Todo &amp; Notes MCP</h1>
+<p class="ok">&#9679; Running — uptime ${Math.floor(process.uptime())}s</p>
+<p>Transport: <strong>Streamable HTTP</strong> (MCP 2024-11-05)</p>
+<p>MCP endpoint: <code>POST /mcp</code></p>
+<p>Health: <a href="/health">/health</a></p>
+<hr style="border-color:#1f1f28;margin:24px 0">
+<p style="color:#666">Tools: get_todos · create_todo · update_todo · delete_todo<br>
+get_notes · create_note · update_note · delete_note</p>
+</body></html>`);
   }
 
   res.writeHead(404); res.end('Not found');
 });
 
-// Increase keep-alive timeout beyond Railway's 60s proxy timeout
 server.keepAliveTimeout = 65000;
 server.headersTimeout   = 66000;
-
-server.listen(PORT, '0.0.0.0', () => console.log('[MCP] Ready on port ' + PORT));
-server.on('error', err => { console.error('[MCP] Error:', err); process.exit(1); });
+server.listen(PORT, '0.0.0.0', () => console.log('[MCP] Streamable HTTP ready on port ' + PORT));
+server.on('error', err => { console.error('[MCP] Fatal:', err); process.exit(1); });
