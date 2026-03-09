@@ -12,32 +12,30 @@
   --bg:#090910;--surface:#0f0f18;--surface2:#141420;--border:#1e1e2e;
   --accent:#c8f060;--accent2:#60d0f0;--accent3:#f060c8;
   --text:#e2e2f0;--muted:#55556a;--danger:#f06060;--warn:#f0b060;
-  --radius:10px;
+  --radius:10px;--sidebar:260px;
 }
 html{scroll-behavior:smooth}
-body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;font-size:13px;min-height:100vh}
-
-/* animated grid bg */
+body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;font-size:13px;min-height:100vh;overflow-x:hidden}
 body::before{content:'';position:fixed;inset:0;
   background-image:linear-gradient(rgba(200,240,96,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(200,240,96,.025) 1px,transparent 1px);
   background-size:48px 48px;pointer-events:none;z-index:0}
 
-.layout{position:relative;z-index:1;display:grid;grid-template-columns:260px 1fr;min-height:100vh}
+/* ── Layout ── */
+.layout{position:relative;z-index:1;display:grid;grid-template-columns:var(--sidebar) 1fr;min-height:100vh}
 
 /* ── Sidebar ── */
-.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:28px 20px;display:flex;flex-direction:column;gap:8px;position:sticky;top:0;height:100vh;overflow-y:auto}
+.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:28px 20px;display:flex;flex-direction:column;gap:8px;position:sticky;top:0;height:100vh;overflow-y:auto;transition:transform .25s ease}
 .brand{display:flex;align-items:center;gap:12px;padding:4px 0 24px}
 .brand-icon{width:38px;height:38px;background:var(--accent);border-radius:10px;display:grid;place-items:center;font-size:18px;color:#090910;font-weight:800;flex-shrink:0}
 .brand-name{font-family:'Syne',sans-serif;font-weight:800;font-size:16px;line-height:1.2}
 .brand-sub{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.8px}
 .nav-label{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);padding:16px 10px 6px;font-weight:600}
-.nav-btn{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;cursor:pointer;border:none;background:transparent;color:var(--muted);font-family:'DM Mono',monospace;font-size:12px;width:100%;text-align:left;transition:all .15s}
+.nav-btn{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;border:none;background:transparent;color:var(--muted);font-family:'DM Mono',monospace;font-size:12px;width:100%;text-align:left;transition:all .15s;min-height:40px}
 .nav-btn:hover{background:var(--surface2);color:var(--text)}
 .nav-btn.active{background:rgba(200,240,96,.1);color:var(--accent);border:1px solid rgba(200,240,96,.15)}
-.nav-icon{font-size:14px;width:18px;text-align:center}
-.status-dot{width:7px;height:7px;border-radius:50%;background:#3a3a4a;margin-left:auto;transition:background .3s}
+.nav-icon{font-size:14px;width:18px;text-align:center;flex-shrink:0}
+.status-dot{width:7px;height:7px;border-radius:50%;background:#3a3a4a;margin-left:auto;transition:background .3s;flex-shrink:0}
 .status-dot.live{background:var(--accent);box-shadow:0 0 6px var(--accent)}
-
 .stat-cards{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding-top:20px;border-top:1px solid var(--border)}
 .stat-card{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
 .stat-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
@@ -45,15 +43,42 @@ body::before{content:'';position:fixed;inset:0;
 .stat-value.green{color:var(--accent)}
 .stat-value.blue{color:var(--accent2)}
 
-/* ── Main ── */
-.main{padding:32px;overflow-y:auto;display:flex;flex-direction:column;gap:24px}
-.page{display:none;flex-direction:column;gap:20px}
-.page.active{display:flex;animation:fadeUp .25s ease both}
+/* ── Mobile topbar ── */
+.topbar{display:none;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100}
+.topbar-brand{display:flex;align-items:center;gap:10px;font-family:'Syne',sans-serif;font-weight:800;font-size:15px}
+.topbar-icon{width:30px;height:30px;background:var(--accent);border-radius:8px;display:grid;place-items:center;font-size:14px;color:#090910;font-weight:800}
+.hamburger{background:none;border:none;cursor:pointer;padding:6px;color:var(--text);font-size:20px;display:flex;align-items:center;justify-content:center;border-radius:6px;transition:background .15s}
+.hamburger:hover{background:var(--surface2)}
 
-.page-header{display:flex;align-items:center;justify-content:space-between;gap:16px}
+/* ── Drawer overlay ── */
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;backdrop-filter:blur(2px)}
+.overlay.open{display:block}
+
+/* ── Mobile drawer ── */
+.drawer{position:fixed;left:0;top:0;bottom:0;width:min(var(--sidebar), 85vw);background:var(--surface);border-right:1px solid var(--border);padding:24px 20px;display:flex;flex-direction:column;gap:8px;z-index:201;transform:translateX(-100%);transition:transform .25s ease;overflow-y:auto}
+.drawer.open{transform:translateX(0)}
+.drawer-close{align-self:flex-end;background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:4px 8px;border-radius:6px;margin-bottom:8px}
+.drawer-close:hover{color:var(--text);background:var(--surface2)}
+
+/* ── Bottom tab bar (mobile) ── */
+.tabbar{display:none;position:fixed;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--border);z-index:100;padding:8px 0 max(8px, env(safe-area-inset-bottom))}
+.tabbar-inner{display:flex;justify-content:space-around}
+.tab-item{display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 12px;border:none;background:none;cursor:pointer;color:var(--muted);font-family:'DM Mono',monospace;font-size:9px;text-transform:uppercase;letter-spacing:.4px;border-radius:8px;transition:color .15s;min-width:60px}
+.tab-item:hover,.tab-item.active{color:var(--accent)}
+.tab-item .ti{font-size:17px}
+
+/* ── Main ── */
+.main{padding:28px 32px;display:flex;flex-direction:column;gap:24px;min-height:100vh}
+.page{display:none;flex-direction:column;gap:20px;animation:fadeUp .25s ease both}
+.page.active{display:flex}
+
+/* ── Page header ── */
+.page-header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .page-title{font-family:'Syne',sans-serif;font-weight:800;font-size:22px}
 .page-title span{color:var(--accent)}
-.btn{padding:9px 18px;border-radius:8px;border:none;cursor:pointer;font-family:'Syne',sans-serif;font-weight:600;font-size:12px;transition:all .15s;white-space:nowrap}
+
+/* ── Buttons ── */
+.btn{padding:9px 18px;border-radius:8px;border:none;cursor:pointer;font-family:'Syne',sans-serif;font-weight:600;font-size:12px;transition:all .15s;white-space:nowrap;min-height:36px}
 .btn-primary{background:var(--accent);color:#090910}
 .btn-primary:hover{background:#d8ff70;transform:translateY(-1px)}
 .btn-ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
@@ -62,40 +87,40 @@ body::before{content:'';position:fixed;inset:0;
 .btn-danger:hover{background:rgba(240,96,96,.22)}
 .btn-done{background:rgba(96,208,240,.1);color:var(--accent2);border:1px solid rgba(96,208,240,.2)}
 .btn-done:hover{background:rgba(96,208,240,.2)}
-.btn-sm{padding:5px 12px;font-size:11px}
+.btn-sm{padding:6px 12px;font-size:11px;min-height:30px}
 
-/* Form */
-.form-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;display:flex;flex-direction:column;gap:12px}
-.form-row{display:flex;gap:10px}
-input,textarea,select{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 13px;font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border-color .2s;width:100%}
+/* ── Forms ── */
+.form-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px;display:flex;flex-direction:column;gap:12px}
+.form-row{display:flex;gap:10px;flex-wrap:wrap}
+.form-row input{min-width:0;flex:1}
+input,textarea,select{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px 13px;font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border-color .2s;width:100%;-webkit-appearance:none}
 input:focus,textarea:focus,select:focus{border-color:var(--accent)}
-select{flex-shrink:0;width:auto;cursor:pointer}
+select{flex-shrink:0;width:auto;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2355556a'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px;-webkit-appearance:none}
 textarea{resize:vertical;min-height:80px;line-height:1.6}
 .form-actions{display:flex;justify-content:flex-end}
 
-/* Cards */
+/* ── Cards ── */
 .cards{display:flex;flex-direction:column;gap:10px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;display:flex;align-items:flex-start;gap:14px;transition:border-color .2s,transform .15s;animation:fadeUp .2s ease both}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;display:flex;align-items:flex-start;gap:12px;transition:border-color .2s,transform .15s;animation:fadeUp .2s ease both}
 .card:hover{border-color:#2a2a40;transform:translateY(-1px)}
 .card.done{opacity:.45}
 .card.done .card-title{text-decoration:line-through}
 .card-body{flex:1;min-width:0}
-.card-title{font-family:'Syne',sans-serif;font-weight:600;font-size:14px;margin-bottom:5px;line-height:1.4}
-.card-content{color:#888;font-size:12px;line-height:1.7;margin:6px 0}
+.card-title{font-family:'Syne',sans-serif;font-weight:600;font-size:14px;margin-bottom:5px;line-height:1.4;word-break:break-word}
+.card-content{color:#888;font-size:12px;line-height:1.7;margin:6px 0;word-break:break-word}
 .card-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px}
-.card-actions{display:flex;gap:8px;flex-shrink:0}
+.card-actions{display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap}
 .pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px}
 .pill-high{background:rgba(240,96,96,.15);color:#f09090}
 .pill-medium{background:rgba(240,176,60,.15);color:#f0c060}
 .pill-low{background:rgba(96,208,96,.15);color:#80e080}
 .tag{background:rgba(96,208,240,.1);color:var(--accent2);border:1px solid rgba(96,208,240,.15);padding:2px 8px;border-radius:4px;font-size:10px}
 .ts{color:var(--muted);font-size:10px}
-
-.empty{text-align:center;padding:60px 20px;color:var(--muted);font-family:'Syne',sans-serif}
+.empty{text-align:center;padding:48px 20px;color:var(--muted);font-family:'Syne',sans-serif}
 .empty-icon{font-size:36px;margin-bottom:12px;opacity:.3}
 
-/* Activity feed */
-.feed{display:flex;flex-direction:column;gap:0}
+/* ── Activity feed ── */
+.feed{display:flex;flex-direction:column}
 .feed-item{display:flex;align-items:flex-start;gap:14px;padding:12px 0;border-bottom:1px solid var(--border);animation:fadeIn .3s ease both}
 .feed-item:last-child{border-bottom:none}
 .feed-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:4px}
@@ -104,40 +129,102 @@ textarea{resize:vertical;min-height:80px;line-height:1.6}
 .dot-delete{background:var(--danger)}
 .dot-connect{background:var(--accent3)}
 .dot-error{background:var(--warn)}
-.feed-body{flex:1}
+.feed-body{flex:1;min-width:0}
 .feed-tool{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
-.feed-summary{font-size:12px;color:var(--text);line-height:1.5}
+.feed-summary{font-size:12px;color:var(--text);line-height:1.5;word-break:break-word}
 .feed-ts{font-size:10px;color:var(--muted);margin-top:2px}
 .feed-empty{padding:40px 0;text-align:center;color:var(--muted);font-family:'Syne',sans-serif}
 
-/* Overview stats */
-.overview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
-.ov-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+/* ── Overview grid ── */
+.overview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+.ov-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px}
 .ov-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px}
-.ov-val{font-family:'Syne',sans-serif;font-size:32px;font-weight:800}
-.ov-val.g{color:var(--accent)}
-.ov-val.b{color:var(--accent2)}
-.ov-val.p{color:var(--accent3)}
-.ov-val.r{color:var(--danger)}
+.ov-val{font-family:'Syne',sans-serif;font-size:30px;font-weight:800}
+.ov-val.g{color:var(--accent)}.ov-val.b{color:var(--accent2)}.ov-val.p{color:var(--accent3)}.ov-val.r{color:var(--danger)}
 .ov-sub{font-size:10px;color:var(--muted);margin-top:4px}
-
 .section-title{font-family:'Syne',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:12px}
 
+/* ── Animations ── */
 .pulse{animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-
-/* Scrollbar */
 ::-webkit-scrollbar{width:4px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+/* ══════════════════════════════════
+   RESPONSIVE BREAKPOINTS
+══════════════════════════════════ */
+
+/* Tablet: hide sidebar, show topbar + drawer */
+@media(max-width:768px){
+  .layout{grid-template-columns:1fr}
+  .sidebar{display:none}
+  .topbar{display:flex}
+  .main{padding:20px 16px 88px;} /* bottom padding for tabbar */
+  .tabbar{display:block}
+  .overview-grid{grid-template-columns:repeat(2,1fr)}
+  .stat-cards{display:none}
+}
+
+/* Phone: tighter spacing */
+@media(max-width:480px){
+  .main{padding:16px 12px 84px}
+  .page-title{font-size:18px}
+  .overview-grid{grid-template-columns:repeat(2,1fr);gap:8px}
+  .ov-card{padding:14px}
+  .ov-val{font-size:24px}
+  .form-row{flex-direction:column}
+  .form-row select{width:100%}
+  .card{flex-direction:column;gap:10px}
+  .card-actions{width:100%;justify-content:flex-end}
+  .btn{min-height:40px}/* touch targets */
+  .topbar{padding:12px 14px}
+}
+
+/* Very small phones */
+@media(max-width:360px){
+  .overview-grid{grid-template-columns:1fr 1fr}
+  .ov-val{font-size:20px}
+}
 </style>
 </head>
 <body>
+
+<!-- ── MOBILE TOPBAR ── -->
+<div class="topbar">
+  <div class="topbar-brand">
+    <div class="topbar-icon">✓</div>
+    Todo & Notes
+  </div>
+  <button class="hamburger" onclick="openDrawer()" aria-label="Menu">☰</button>
+</div>
+
+<!-- ── OVERLAY ── -->
+<div class="overlay" id="overlay" onclick="closeDrawer()"></div>
+
+<!-- ── MOBILE DRAWER ── -->
+<div class="drawer" id="drawer">
+  <button class="drawer-close" onclick="closeDrawer()">✕</button>
+  <div class="brand">
+    <div class="brand-icon">✓</div>
+    <div>
+      <div class="brand-name">Todo & Notes</div>
+      <div class="brand-sub">MCP Dashboard</div>
+    </div>
+  </div>
+  <span class="nav-label">Views</span>
+  <button class="nav-btn" onclick="goto('overview');closeDrawer()"><span class="nav-icon">⬡</span> Overview <span class="status-dot live" id="dot-overview-d"></span></button>
+  <button class="nav-btn" onclick="goto('activity');closeDrawer()"><span class="nav-icon">◎</span> Live Activity <span class="status-dot" id="dot-activity-d"></span></button>
+  <span class="nav-label">Data</span>
+  <button class="nav-btn" onclick="goto('todos');closeDrawer()"><span class="nav-icon">☑</span> Todos</button>
+  <button class="nav-btn" onclick="goto('notes');closeDrawer()"><span class="nav-icon">◈</span> Notes</button>
+</div>
+
 <div class="layout">
 
-<!-- SIDEBAR -->
+<!-- ── SIDEBAR (desktop) ── -->
 <aside class="sidebar">
   <div class="brand">
     <div class="brand-icon">✓</div>
@@ -146,15 +233,12 @@ textarea{resize:vertical;min-height:80px;line-height:1.6}
       <div class="brand-sub">MCP Dashboard</div>
     </div>
   </div>
-
   <span class="nav-label">Views</span>
   <button class="nav-btn active" onclick="goto('overview')"><span class="nav-icon">⬡</span> Overview <span class="status-dot live" id="dot-overview"></span></button>
   <button class="nav-btn" onclick="goto('activity')"><span class="nav-icon">◎</span> Live Activity <span class="status-dot" id="dot-activity"></span></button>
-
   <span class="nav-label">Data</span>
   <button class="nav-btn" onclick="goto('todos')"><span class="nav-icon">☑</span> Todos</button>
   <button class="nav-btn" onclick="goto('notes')"><span class="nav-icon">◈</span> Notes</button>
-
   <div class="stat-cards">
     <div class="stat-card">
       <div class="stat-label">Todos</div>
@@ -167,7 +251,7 @@ textarea{resize:vertical;min-height:80px;line-height:1.6}
   </div>
 </aside>
 
-<!-- MAIN -->
+<!-- ── MAIN ── -->
 <main class="main">
 
   <!-- OVERVIEW -->
@@ -181,8 +265,8 @@ textarea{resize:vertical;min-height:80px;line-height:1.6}
       <div class="ov-card"><div class="ov-label">Pending</div><div class="ov-val b" id="ov-pending">–</div><div class="ov-sub">not done yet</div></div>
       <div class="ov-card"><div class="ov-label">Completed</div><div class="ov-val p" id="ov-completed">–</div><div class="ov-sub">well done</div></div>
       <div class="ov-card"><div class="ov-label">Notes</div><div class="ov-val g" id="ov-notes">–</div><div class="ov-sub">saved</div></div>
-      <div class="ov-card"><div class="ov-label">MCP Sessions</div><div class="ov-val b" id="ov-sessions">–</div><div class="ov-sub">Claude connections</div></div>
-      <div class="ov-card"><div class="ov-label">Uptime</div><div class="ov-val" id="ov-uptime" style="font-size:20px">–</div><div class="ov-sub">server running</div></div>
+      <div class="ov-card"><div class="ov-label">Sessions</div><div class="ov-val b" id="ov-sessions">–</div><div class="ov-sub">Claude connections</div></div>
+      <div class="ov-card"><div class="ov-label">Uptime</div><div class="ov-val" id="ov-uptime" style="font-size:18px">–</div><div class="ov-sub">server running</div></div>
     </div>
     <div>
       <div class="section-title">Recent Activity</div>
@@ -195,7 +279,7 @@ textarea{resize:vertical;min-height:80px;line-height:1.6}
     <div class="page-header">
       <div class="page-title">Live <span>Activity</span></div>
       <div style="display:flex;gap:8px;align-items:center">
-        <span style="color:var(--accent);font-size:11px" class="pulse" id="live-indicator">● LIVE</span>
+        <span style="color:var(--accent);font-size:11px" class="pulse">● LIVE</span>
         <button class="btn btn-ghost" onclick="loadActivity()">↻ Refresh</button>
       </div>
     </div>
@@ -234,20 +318,49 @@ textarea{resize:vertical;min-height:80px;line-height:1.6}
 </main>
 </div>
 
+<!-- ── BOTTOM TAB BAR (mobile) ── -->
+<nav class="tabbar">
+  <div class="tabbar-inner">
+    <button class="tab-item active" id="tab-overview" onclick="goto('overview')"><span class="ti">⬡</span>Overview</button>
+    <button class="tab-item" id="tab-activity" onclick="goto('activity')"><span class="ti">◎</span>Activity</button>
+    <button class="tab-item" id="tab-todos" onclick="goto('todos')"><span class="ti">☑</span>Todos</button>
+    <button class="tab-item" id="tab-notes" onclick="goto('notes')"><span class="ti">◈</span>Notes</button>
+  </div>
+</nav>
+
 <script>
-const API = '';
-let currentPage = 'overview';
+const API='';
+let currentPage='overview';
 let autoRefresh;
 
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
-function goto(page) {
-  currentPage = page;
+function openDrawer(){
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('overlay').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+function closeDrawer(){
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('overlay').classList.remove('open');
+  document.body.style.overflow='';
+}
+
+function goto(page){
+  currentPage=page;
+  // pages
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
   document.getElementById('page-'+page).classList.add('active');
-  document.querySelectorAll('.nav-btn').forEach(b=>{if(b.textContent.trim().toLowerCase().startsWith(page)||b.onclick.toString().includes("'"+page+"'"))b.classList.add('active')});
-  if(page==='overview') { loadStats(); loadActivity(); }
+  // sidebar nav
+  document.querySelectorAll('.sidebar .nav-btn, .drawer .nav-btn').forEach(b=>{
+    b.classList.toggle('active', b.getAttribute('onclick')&&b.getAttribute('onclick').includes("'"+page+"'"));
+  });
+  // bottom tabs
+  document.querySelectorAll('.tab-item').forEach(t=>t.classList.remove('active'));
+  const tab=document.getElementById('tab-'+page);
+  if(tab) tab.classList.add('active');
+
+  if(page==='overview'){loadStats();loadActivity();}
   if(page==='activity') loadActivity();
   if(page==='todos') loadTodos();
   if(page==='notes') loadNotes();
@@ -258,19 +371,16 @@ function fmtUptime(s){
   if(s<3600) return Math.floor(s/60)+'m '+Math.floor(s%60)+'s';
   return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
 }
-
 function fmtTs(ts){
-  const d=new Date(ts), now=new Date();
-  const diff=Math.floor((now-d)/1000);
+  const d=new Date(ts),now=new Date(),diff=Math.floor((now-d)/1000);
   if(diff<5) return 'just now';
   if(diff<60) return diff+'s ago';
   if(diff<3600) return Math.floor(diff/60)+'m ago';
   return d.toLocaleTimeString();
 }
-
 function dotClass(type){return{read:'dot-read',write:'dot-write',delete:'dot-delete',connect:'dot-connect',error:'dot-error'}[type]||'dot-read'}
 
-function renderFeedItems(items, limit=10) {
+function renderFeed(items,limit=10){
   if(!items||!items.length) return '<div class="feed-empty">No activity yet — ask Claude to manage your todos!</div>';
   return items.slice(0,limit).map(a=>`
     <div class="feed-item">
@@ -283,44 +393,41 @@ function renderFeedItems(items, limit=10) {
     </div>`).join('');
 }
 
-async function loadStats() {
-  try {
-    const r = await fetch(API+'/api/stats');
-    const s = await r.json();
-    document.getElementById('ov-total-todos').textContent = s.todos.total;
-    document.getElementById('ov-pending').textContent = s.todos.pending;
-    document.getElementById('ov-completed').textContent = s.todos.completed;
-    document.getElementById('ov-notes').textContent = s.notes.total;
-    document.getElementById('ov-sessions').textContent = s.sessions;
-    document.getElementById('ov-uptime').textContent = fmtUptime(s.uptime);
-    document.getElementById('sb-todos').textContent = s.todos.total;
-    document.getElementById('sb-notes').textContent = s.notes.total;
-    document.getElementById('overview-feed').innerHTML = renderFeedItems(s.activity, 8);
-    document.getElementById('dot-overview').classList.add('live');
-  } catch(e) {
-    document.getElementById('dot-overview').classList.remove('live');
-  }
+function setDot(id,live){
+  ['','-d'].forEach(s=>{const el=document.getElementById(id+s);if(el)el.classList.toggle('live',live);});
 }
 
-async function loadActivity() {
-  try {
-    const r = await fetch(API+'/api/activity');
-    const items = await r.json();
-    const el = document.getElementById('activity-feed');
-    el.innerHTML = items.length ? renderFeedItems(items, 50) : '<div class="feed-empty pulse">Waiting for Claude to call your MCP tools…</div>';
-    document.getElementById('dot-activity').classList.toggle('live', items.length>0);
-  } catch(e) {}
+async function loadStats(){
+  try{
+    const s=await fetch(API+'/api/stats').then(r=>r.json());
+    document.getElementById('ov-total-todos').textContent=s.todos.total;
+    document.getElementById('ov-pending').textContent=s.todos.pending;
+    document.getElementById('ov-completed').textContent=s.todos.completed;
+    document.getElementById('ov-notes').textContent=s.notes.total;
+    document.getElementById('ov-sessions').textContent=s.sessions;
+    document.getElementById('ov-uptime').textContent=fmtUptime(s.uptime);
+    document.getElementById('sb-todos').textContent=s.todos.total;
+    document.getElementById('sb-notes').textContent=s.notes.total;
+    document.getElementById('overview-feed').innerHTML=renderFeed(s.activity,8);
+    setDot('dot-overview',true);
+  }catch(e){setDot('dot-overview',false);}
 }
 
-async function refresh() { await loadStats(); await loadActivity(); }
+async function loadActivity(){
+  try{
+    const items=await fetch(API+'/api/activity').then(r=>r.json());
+    document.getElementById('activity-feed').innerHTML=items.length?renderFeed(items,50):'<div class="feed-empty pulse">Waiting for Claude to call your MCP tools…</div>';
+    setDot('dot-activity',items.length>0);
+  }catch(e){}
+}
 
-// ── TODOS ──
-async function loadTodos() {
-  const r = await fetch(API+'/api/todos');
-  const todos = await r.json();
-  const el = document.getElementById('todo-list');
+async function refresh(){await loadStats();await loadActivity();}
+
+async function loadTodos(){
+  const todos=await fetch(API+'/api/todos').then(r=>r.json());
+  const el=document.getElementById('todo-list');
   if(!todos.length){el.innerHTML='<div class="empty"><div class="empty-icon">☑</div>No todos yet. Add one above or ask Claude!</div>';return;}
-  el.innerHTML = todos.map(t=>`
+  el.innerHTML=todos.map(t=>`
     <div class="card ${t.completed?'done':''}">
       <div class="card-body">
         <div class="card-title">${esc(t.title)}</div>
@@ -345,21 +452,11 @@ async function addTodo(){
   document.getElementById('todo-title').value='';
   loadTodos();
 }
+async function completeTodo(id){await callMCP('update_todo',{id,completed:true});loadTodos();}
+async function deleteTodo(id){await callMCP('delete_todo',{id});loadTodos();}
 
-async function completeTodo(id){
-  await callMCP('update_todo',{id,completed:true});
-  loadTodos();
-}
-
-async function deleteTodo(id){
-  await callMCP('delete_todo',{id});
-  loadTodos();
-}
-
-// ── NOTES ──
 async function loadNotes(){
-  const r=await fetch(API+'/api/notes');
-  const notes=await r.json();
+  const notes=await fetch(API+'/api/notes').then(r=>r.json());
   const el=document.getElementById('note-list');
   if(!notes.length){el.innerHTML='<div class="empty"><div class="empty-icon">◈</div>No notes yet. Write one above or ask Claude!</div>';return;}
   el.innerHTML=notes.map(n=>`
@@ -368,7 +465,7 @@ async function loadNotes(){
         <div class="card-title">${esc(n.title)}</div>
         <div class="card-content">${esc(n.content)}</div>
         <div class="card-meta">
-          ${(n.tags||[]).map(tag=>`<span class="tag">#${esc(tag)}</span>`).join('')}
+          ${(n.tags||[]).map(t=>`<span class="tag">#${esc(t)}</span>`).join('')}
           <span class="ts">${new Date(n.createdAt).toLocaleDateString()}</span>
         </div>
       </div>
@@ -377,7 +474,6 @@ async function loadNotes(){
       </div>
     </div>`).join('');
 }
-
 async function addNote(){
   const title=document.getElementById('note-title').value.trim();
   const content=document.getElementById('note-content').value.trim();
@@ -390,32 +486,21 @@ async function addNote(){
   document.getElementById('note-tags').value='';
   loadNotes();
 }
+async function deleteNote(id){await callMCP('delete_note',{id});loadNotes();}
 
-async function deleteNote(id){
-  await callMCP('delete_note',{id});
-  loadNotes();
+async function callMCP(tool,args){
+  return fetch(API+'/mcp',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:tool,arguments:args}})}).then(r=>r.json());
 }
 
-// ── MCP JSON-RPC helper (calls our own server) ──
-async function callMCP(tool, args){
-  const r = await fetch(API+'/mcp',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:tool,arguments:args}})
-  });
-  return r.json();
-}
-
-// ── Auto-refresh ──
 function startAutoRefresh(){
   clearInterval(autoRefresh);
-  autoRefresh = setInterval(()=>{
+  autoRefresh=setInterval(()=>{
     if(currentPage==='overview') loadStats();
     if(currentPage==='activity') loadActivity();
-  }, 3000);
+  },3000);
 }
 
-// Init
 loadStats();
 loadActivity();
 startAutoRefresh();
