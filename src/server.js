@@ -78,23 +78,23 @@ function readJSON(req) {
   return new Promise((ok, fail) => {
     const chunks = [];
     req.on('data', c => chunks.push(c));
-    req.on('end', () => { try { ok(JSON.parse(Buffer.concat(chunks).toString() || 'null')); } catch(e) { fail(e); } });
+    req.on('end', () => {
+      try { ok(JSON.parse(Buffer.concat(chunks).toString() || 'null')); }
+      catch(e) { fail(e); }
+    });
     req.on('error', fail);
   });
 }
 
-// In-memory session store for Streamable HTTP
 const sessions = new Map();
 
 function handleRPC(msg, sessionId) {
   const { id, method, params = {} } = msg;
-
-  // Initialise creates a session
   if (method === 'initialize') {
     sessions.set(sessionId, { createdAt: Date.now() });
     return { id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'todo-notes-mcp', version: '1.0.0' } } };
   }
-  if (method === 'notifications/initialized') return null; // no response
+  if (method === 'notifications/initialized') return null;
   if (method === 'ping') return { id, result: {} };
   if (method === 'tools/list') return { id, result: { tools: TOOLS } };
   if (method === 'tools/call') {
@@ -115,58 +115,99 @@ const server = http.createServer(async (req, res) => {
   let pathname = '/';
   try { pathname = new URL(req.url, 'http://x').pathname; } catch(_) {}
 
+  const host = req.headers['x-forwarded-host'] || req.headers['host'] || 'localhost';
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  const base = proto + '://' + host;
+
   // ── Health
   if (pathname === '/health') {
-    return json(res, 200, { status: 'ok', uptime: Math.floor(process.uptime()), sessions: sessions.size });
+    return json(res, 200, { status: 'ok', uptime: Math.floor(process.uptime()) });
   }
 
-  // ── MCP Streamable HTTP endpoint (POST /mcp)
-  // This is the modern MCP transport — no SSE, no persistent connection.
-  // ChatGPT POSTs JSON-RPC and gets JSON back immediately.
+  // ── OAuth 2.0 Authorization Server Metadata (RFC 8414)
+  // ChatGPT App Marketplace requires this even for no-auth servers.
+  // We point all OAuth flows back to a dummy passthrough so no real auth happens.
+  if (pathname === '/.well-known/oauth-authorization-server') {
+    return json(res, 200, {
+      issuer: base,
+      authorization_endpoint: base + '/oauth/authorize',
+      token_endpoint: base + '/oauth/token',
+      registration_endpoint: base + '/oauth/register',
+      response_types_supported: ['code'],
+      grant_types_supported: ['authorization_code'],
+      code_challenge_methods_supported: ['S256'],
+      token_endpoint_auth_methods_supported: ['none']
+    });
+  }
+
+  // ── OAuth Dynamic Client Registration (RFC 7591)
+  if (req.method === 'POST' && pathname === '/oauth/register') {
+    let body = {};
+    try { body = await readJSON(req); } catch(_) {}
+    const clientId = uid();
+    return json(res, 201, {
+      client_id: clientId,
+      client_secret: uid(),
+      client_name: body.client_name || 'ChatGPT',
+      redirect_uris: body.redirect_uris || [],
+      grant_types: ['authorization_code'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'none'
+    });
+  }
+
+  // ── OAuth Authorize — redirect straight back with a code (no real auth)
+  if (req.method === 'GET' && pathname === '/oauth/authorize') {
+    const url = new URL(req.url, base);
+    const redirectUri = url.searchParams.get('redirect_uri') || '';
+    const state = url.searchParams.get('state') || '';
+    const code = uid();
+    const redirect = redirectUri + (redirectUri.includes('?') ? '&' : '?') +
+      'code=' + encodeURIComponent(code) +
+      (state ? '&state=' + encodeURIComponent(state) : '');
+    res.writeHead(302, { Location: redirect });
+    return res.end();
+  }
+
+  // ── OAuth Token — hand back a static token (no real auth)
+  if (req.method === 'POST' && pathname === '/oauth/token') {
+    return json(res, 200, {
+      access_token: 'open-access-' + uid(),
+      token_type: 'bearer',
+      expires_in: 86400 * 365
+    });
+  }
+
+  // ── MCP Streamable HTTP endpoint
   if (req.method === 'POST' && pathname === '/mcp') {
     let body;
     try { body = await readJSON(req); } catch(e) {
       return json(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
     }
 
-    // Session management
     let sessionId = req.headers['mcp-session-id'];
-    if (!sessionId) {
-      sessionId = uid();
-      res.setHeader('Mcp-Session-Id', sessionId);
-    }
+    if (!sessionId) { sessionId = uid(); res.setHeader('Mcp-Session-Id', sessionId); }
 
-    // Accept single message or batch array
     const messages = Array.isArray(body) ? body : [body];
     const responses = [];
-
     for (const msg of messages) {
       if (!msg || msg.jsonrpc !== '2.0') continue;
       const r = handleRPC(msg, sessionId);
       if (r) responses.push({ jsonrpc: '2.0', ...r });
     }
 
-    // If all messages were notifications (no responses), return 204
     if (responses.length === 0) { res.writeHead(204); return res.end(); }
-
-    // Return single object or array depending on input
     return json(res, 200, Array.isArray(body) ? responses : responses[0]);
   }
 
-  // ── DELETE /mcp  (session termination)
   if (req.method === 'DELETE' && pathname === '/mcp') {
     const sid = req.headers['mcp-session-id'];
     if (sid) sessions.delete(sid);
     res.writeHead(204); return res.end();
   }
 
-  // ── GET /mcp  (capability discovery — some clients check this)
   if (req.method === 'GET' && pathname === '/mcp') {
-    return json(res, 200, {
-      transport: 'streamable-http',
-      protocolVersion: '2024-11-05',
-      capabilities: { tools: {} }
-    });
+    return json(res, 200, { transport: 'streamable-http', protocolVersion: '2024-11-05' });
   }
 
   // ── Browser status page
@@ -175,15 +216,13 @@ const server = http.createServer(async (req, res) => {
     return res.end(`<!DOCTYPE html><html><head><title>Todo MCP</title>
 <style>body{background:#0c0c0f;color:#c8f060;font-family:monospace;padding:48px;line-height:2}
 code{background:#1a1a22;color:#60d0f0;padding:2px 8px;border-radius:4px}a{color:#60d0f0}
-.ok{color:#80e080}</style></head><body>
+.ok{color:#80e080}.dim{color:#555}</style></head><body>
 <h1>&#10003; Todo &amp; Notes MCP</h1>
-<p class="ok">&#9679; Running — uptime ${Math.floor(process.uptime())}s</p>
-<p>Transport: <strong>Streamable HTTP</strong> (MCP 2024-11-05)</p>
+<p class="ok">&#9679; Running &mdash; uptime ${Math.floor(process.uptime())}s</p>
 <p>MCP endpoint: <code>POST /mcp</code></p>
+<p>OAuth metadata: <code><a href="/.well-known/oauth-authorization-server">/.well-known/oauth-authorization-server</a></code></p>
 <p>Health: <a href="/health">/health</a></p>
-<hr style="border-color:#1f1f28;margin:24px 0">
-<p style="color:#666">Tools: get_todos · create_todo · update_todo · delete_todo<br>
-get_notes · create_note · update_note · delete_note</p>
+<p class="dim">Tools: get_todos · create_todo · update_todo · delete_todo · get_notes · create_note · update_note · delete_note</p>
 </body></html>`);
   }
 
@@ -191,6 +230,6 @@ get_notes · create_note · update_note · delete_note</p>
 });
 
 server.keepAliveTimeout = 65000;
-server.headersTimeout   = 66000;
-server.listen(PORT, '0.0.0.0', () => console.log('[MCP] Streamable HTTP ready on port ' + PORT));
+server.headersTimeout = 66000;
+server.listen(PORT, '0.0.0.0', () => console.log('[MCP] Ready on port ' + PORT));
 server.on('error', err => { console.error('[MCP] Fatal:', err); process.exit(1); });
