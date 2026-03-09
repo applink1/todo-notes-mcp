@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Todo & Notes — MCP Plugin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0c0c0f;
+      --surface: #141418;
+      --border: #1f1f28;
+      --accent: #c8f060;
+      --accent2: #60d0f0;
+      --text: #e8e8ec;
+      --muted: #6b6b7a;
+      --danger: #f06060;
+      --radius: 10px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'DM Mono', monospace;
+      font-size: 14px;
+      min-height: 100vh;
+      padding: 0;
+    }
+
+    /* Grid background */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(200,240,96,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(200,240,96,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 48px 24px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 48px;
+      animation: fadeDown 0.6s ease both;
+    }
+
+    .logo-mark {
+      width: 48px; height: 48px;
+      background: var(--accent);
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 22px;
+      color: #0c0c0f;
+      flex-shrink: 0;
+    }
+
+    h1 {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: clamp(24px, 5vw, 36px);
+      letter-spacing: -0.5px;
+    }
+
+    h1 span { color: var(--accent); }
+
+    .badge {
+      display: inline-block;
+      background: rgba(200,240,96,0.1);
+      color: var(--accent);
+      border: 1px solid rgba(200,240,96,0.2);
+      padding: 3px 10px;
+      border-radius: 99px;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 24px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 4px;
+      width: fit-content;
+      animation: fadeDown 0.6s 0.1s ease both;
+    }
+
+    .tab {
+      padding: 8px 20px;
+      border-radius: 7px;
+      cursor: pointer;
+      font-family: 'Syne', sans-serif;
+      font-weight: 600;
+      font-size: 13px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      transition: all 0.2s;
+    }
+
+    .tab.active {
+      background: var(--accent);
+      color: #0c0c0f;
+    }
+
+    .panel { display: none; animation: fadeUp 0.3s ease both; }
+    .panel.active { display: block; }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      animation: fadeDown 0.6s 0.2s ease both;
+    }
+
+    input[type="text"], textarea, select {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      font-family: 'DM Mono', monospace;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.2s;
+      width: 100%;
+    }
+
+    input:focus, textarea:focus, select:focus {
+      border-color: var(--accent);
+    }
+
+    select { flex-shrink: 0; width: auto; }
+    textarea { resize: vertical; min-height: 80px; }
+
+    .btn {
+      padding: 10px 20px;
+      border-radius: var(--radius);
+      border: none;
+      cursor: pointer;
+      font-family: 'Syne', sans-serif;
+      font-weight: 600;
+      font-size: 13px;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #0c0c0f;
+    }
+
+    .btn-primary:hover { background: #d9ff70; transform: translateY(-1px); }
+    .btn-danger { background: rgba(240,96,96,0.15); color: var(--danger); border: 1px solid rgba(240,96,96,0.2); }
+    .btn-danger:hover { background: rgba(240,96,96,0.25); }
+    .btn-complete { background: rgba(96,208,240,0.12); color: var(--accent2); border: 1px solid rgba(96,208,240,0.2); }
+    .btn-complete:hover { background: rgba(96,208,240,0.22); }
+
+    .list { display: flex; flex-direction: column; gap: 10px; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      transition: border-color 0.2s, transform 0.15s;
+      animation: fadeUp 0.3s ease both;
+    }
+
+    .card:hover { border-color: #2a2a38; transform: translateY(-1px); }
+    .card.done { opacity: 0.5; }
+    .card.done .card-title { text-decoration: line-through; }
+
+    .card-body { flex: 1; min-width: 0; }
+    .card-title { font-family: 'Syne', sans-serif; font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+    .card-meta { color: var(--muted); font-size: 11px; display: flex; gap: 10px; flex-wrap: wrap; }
+
+    .priority {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .priority-high { background: rgba(240,96,96,0.15); color: #f09090; }
+    .priority-medium { background: rgba(240,180,60,0.15); color: #f0c060; }
+    .priority-low { background: rgba(96,208,96,0.15); color: #80e080; }
+
+    .tag {
+      display: inline-block;
+      background: rgba(96,208,240,0.1);
+      color: var(--accent2);
+      border: 1px solid rgba(96,208,240,0.15);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+    }
+
+    .card-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+    .empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--muted);
+      font-family: 'Syne', sans-serif;
+    }
+    .empty .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.4; }
+
+    .endpoints {
+      margin-top: 48px;
+      padding: 24px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      animation: fadeUp 0.6s 0.3s ease both;
+    }
+
+    .endpoints h3 {
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      margin-bottom: 16px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .endpoint-row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .endpoint-row:last-child { border-bottom: none; }
+
+    .method {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 4px;
+      min-width: 52px;
+      text-align: center;
+    }
+    .GET { background: rgba(96,208,96,0.12); color: #80e080; }
+    .POST { background: rgba(96,208,240,0.12); color: var(--accent2); }
+    .PATCH { background: rgba(240,180,60,0.12); color: #f0c060; }
+    .DELETE { background: rgba(240,96,96,0.12); color: var(--danger); }
+
+    .path { color: var(--text); flex: 1; }
+    .desc { color: var(--muted); font-size: 12px; }
+
+    @keyframes fadeDown {
+      from { opacity: 0; transform: translateY(-12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div class="logo-mark">✓</div>
+    <div>
+      <h1>Todo & <span>Notes</span></h1>
+      <span class="badge">MCP Plugin · Railway</span>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('todos')">Todos</button>
+    <button class="tab" onclick="switchTab('notes')">Notes</button>
+  </div>
+
+  <!-- TODOS PANEL -->
+  <div id="panel-todos" class="panel active">
+    <div class="input-row">
+      <input type="text" id="todo-input" placeholder="Add a new todo..." onkeydown="if(event.key==='Enter') addTodo()" />
+      <select id="todo-priority">
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+        <option value="low">Low</option>
+      </select>
+      <button class="btn btn-primary" onclick="addTodo()">Add</button>
+    </div>
+    <div class="list" id="todo-list"></div>
+  </div>
+
+  <!-- NOTES PANEL -->
+  <div id="panel-notes" class="panel">
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px;animation:fadeDown 0.4s ease both;">
+      <input type="text" id="note-title" placeholder="Note title..." />
+      <textarea id="note-content" placeholder="Write your note..."></textarea>
+      <input type="text" id="note-tags" placeholder="Tags (comma separated, optional)" />
+      <div style="display:flex;justify-content:flex-end;">
+        <button class="btn btn-primary" onclick="addNote()">Save Note</button>
+      </div>
+    </div>
+    <div class="list" id="note-list"></div>
+  </div>
+
+  <!-- API ENDPOINTS -->
+  <div class="endpoints">
+    <h3>API Endpoints</h3>
+    <div class="endpoint-row"><span class="method GET">GET</span><span class="path">/todos</span><span class="desc">List all todos</span></div>
+    <div class="endpoint-row"><span class="method POST">POST</span><span class="path">/todos</span><span class="desc">Create todo</span></div>
+    <div class="endpoint-row"><span class="method PATCH">PATCH</span><span class="path">/todos/:id</span><span class="desc">Update / complete todo</span></div>
+    <div class="endpoint-row"><span class="method DELETE">DELETE</span><span class="path">/todos/:id</span><span class="desc">Delete todo</span></div>
+    <div class="endpoint-row"><span class="method GET">GET</span><span class="path">/notes</span><span class="desc">List all notes</span></div>
+    <div class="endpoint-row"><span class="method POST">POST</span><span class="path">/notes</span><span class="desc">Create note</span></div>
+    <div class="endpoint-row"><span class="method PATCH">PATCH</span><span class="path">/notes/:id</span><span class="desc">Update note</span></div>
+    <div class="endpoint-row"><span class="method DELETE">DELETE</span><span class="path">/notes/:id</span><span class="desc">Delete note</span></div>
+    <div class="endpoint-row"><span class="method GET">GET</span><span class="path">/.well-known/ai-plugin.json</span><span class="desc">Plugin manifest</span></div>
+    <div class="endpoint-row"><span class="method GET">GET</span><span class="path">/openapi.yaml</span><span class="desc">OpenAPI spec for ChatGPT</span></div>
+  </div>
+
+</div>
+
+<script>
+  const API = '';  // same origin
+  let currentTab = 'todos';
+
+  function switchTab(tab) {
+    currentTab = tab;
+    document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', ['todos','notes'][i] === tab));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('panel-' + tab).classList.add('active');
+    tab === 'todos' ? loadTodos() : loadNotes();
+  }
+
+  // ── TODOS ──
+  async function loadTodos() {
+    const res = await fetch(API + '/todos');
+    const todos = await res.json();
+    const list = document.getElementById('todo-list');
+    if (!todos.length) {
+      list.innerHTML = '<div class="empty"><div class="icon">☑</div>No todos yet. Add one above!</div>';
+      return;
+    }
+    list.innerHTML = todos.map(t => `
+      <div class="card ${t.completed ? 'done' : ''}">
+        <div class="card-body">
+          <div class="card-title">${esc(t.title)}</div>
+          <div class="card-meta">
+            <span class="priority priority-${t.priority}">${t.priority}</span>
+            ${t.dueDate ? `<span>Due: ${t.dueDate}</span>` : ''}
+            <span>${new Date(t.createdAt).toLocaleDateString()}</span>
+          </div>
+        </div>
+        <div class="card-actions">
+          ${!t.completed ? `<button class="btn btn-complete" onclick="completeTodo('${t.id}')">✓ Done</button>` : ''}
+          <button class="btn btn-danger" onclick="deleteTodo('${t.id}')">✕</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  async function addTodo() {
+    const input = document.getElementById('todo-input');
+    const title = input.value.trim();
+    const priority = document.getElementById('todo-priority').value;
+    if (!title) return;
+    await fetch(API + '/todos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, priority })
+    });
+    input.value = '';
+    loadTodos();
+  }
+
+  async function completeTodo(id) {
+    await fetch(API + '/todos/' + id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ completed: true })
+    });
+    loadTodos();
+  }
+
+  async function deleteTodo(id) {
+    await fetch(API + '/todos/' + id, { method: 'DELETE' });
+    loadTodos();
+  }
+
+  // ── NOTES ──
+  async function loadNotes() {
+    const res = await fetch(API + '/notes');
+    const notes = await res.json();
+    const list = document.getElementById('note-list');
+    if (!notes.length) {
+      list.innerHTML = '<div class="empty"><div class="icon">📝</div>No notes yet. Write one above!</div>';
+      return;
+    }
+    list.innerHTML = notes.map(n => `
+      <div class="card">
+        <div class="card-body">
+          <div class="card-title">${esc(n.title)}</div>
+          <div style="color:#aaa;font-size:13px;margin:8px 0;line-height:1.6;">${esc(n.content)}</div>
+          <div class="card-meta">
+            ${n.tags.map(tag => `<span class="tag">#${esc(tag)}</span>`).join('')}
+            <span>${new Date(n.createdAt).toLocaleDateString()}</span>
+          </div>
+        </div>
+        <div class="card-actions">
+          <button class="btn btn-danger" onclick="deleteNote('${n.id}')">✕</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  async function addNote() {
+    const title = document.getElementById('note-title').value.trim();
+    const content = document.getElementById('note-content').value.trim();
+    const tagsRaw = document.getElementById('note-tags').value.trim();
+    const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+    if (!title || !content) return alert('Title and content are required.');
+    await fetch(API + '/notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, content, tags })
+    });
+    document.getElementById('note-title').value = '';
+    document.getElementById('note-content').value = '';
+    document.getElementById('note-tags').value = '';
+    loadNotes();
+  }
+
+  async function deleteNote(id) {
+    await fetch(API + '/notes/' + id, { method: 'DELETE' });
+    loadNotes();
+  }
+
+  function esc(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // Init
+  loadTodos();
+</script>
+</body>
+</html>
