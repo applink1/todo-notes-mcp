@@ -1,27 +1,18 @@
-const express = require('express');
-const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
+// MCP Todo & Notes Server — zero external dependencies (Node built-ins only)
+const http = require('http');
+const crypto = require('crypto');
 
-const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Accept', 'Authorization', 'Mcp-Session-Id'],
-  exposedHeaders: ['Mcp-Session-Id'],
-}));
-app.use(express.json());
-
-// ─── In-memory data ────────────────────────────────────────────────────────────
 let todos = [];
 let notes = [];
 
-// ─── MCP Tool definitions ──────────────────────────────────────────────────────
+const uid = () => crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+
 const TOOLS = [
   {
     name: 'get_todos',
-    description: 'Get all todos. Optionally filter by status: all, pending, or completed.',
+    description: 'Get all todos. Filter by status: all, pending, or completed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -36,15 +27,15 @@ const TOOLS = [
       type: 'object',
       required: ['title'],
       properties: {
-        title: { type: 'string', description: 'The todo title' },
+        title: { type: 'string' },
         priority: { type: 'string', enum: ['low', 'medium', 'high'] },
-        dueDate: { type: 'string', description: 'Optional due date' }
+        dueDate: { type: 'string' }
       }
     }
   },
   {
     name: 'update_todo',
-    description: 'Update a todo — mark it complete or change title/priority. Requires the todo ID.',
+    description: 'Update a todo — mark complete, change title or priority. Requires the todo ID from get_todos.',
     inputSchema: {
       type: 'object',
       required: ['id'],
@@ -58,12 +49,8 @@ const TOOLS = [
   },
   {
     name: 'delete_todo',
-    description: 'Delete a todo by ID.',
-    inputSchema: {
-      type: 'object',
-      required: ['id'],
-      properties: { id: { type: 'string' } }
-    }
+    description: 'Delete a todo by its ID.',
+    inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } }
   },
   {
     name: 'get_notes',
@@ -72,7 +59,7 @@ const TOOLS = [
   },
   {
     name: 'create_note',
-    description: 'Create a new note with title, content, and optional tags.',
+    description: 'Create a new note with a title and content.',
     inputSchema: {
       type: 'object',
       required: ['title', 'content'],
@@ -99,170 +86,166 @@ const TOOLS = [
   },
   {
     name: 'delete_note',
-    description: 'Delete a note by ID.',
-    inputSchema: {
-      type: 'object',
-      required: ['id'],
-      properties: { id: { type: 'string' } }
-    }
+    description: 'Delete a note by its ID.',
+    inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } }
   }
 ];
 
-// ─── Tool execution ────────────────────────────────────────────────────────────
-function executeTool(name, args) {
+function runTool(name, args) {
   switch (name) {
     case 'get_todos': {
-      const status = args.status || 'all';
-      let result = todos;
-      if (status === 'pending') result = todos.filter(t => !t.completed);
-      if (status === 'completed') result = todos.filter(t => t.completed);
+      const s = args.status || 'all';
+      const result = s === 'pending' ? todos.filter(t => !t.completed)
+                   : s === 'completed' ? todos.filter(t => t.completed) : todos;
       return { todos: result, count: result.length };
     }
     case 'create_todo': {
       if (!args.title) throw new Error('title is required');
-      const todo = { id: uuidv4(), title: args.title, completed: false, priority: args.priority || 'medium', dueDate: args.dueDate || null, createdAt: new Date().toISOString() };
-      todos.push(todo);
-      return { success: true, todo };
+      const t = { id: uid(), title: args.title, completed: false, priority: args.priority || 'medium', dueDate: args.dueDate || null, createdAt: new Date().toISOString() };
+      todos.push(t);
+      return { success: true, todo: t };
     }
     case 'update_todo': {
-      const idx = todos.findIndex(t => t.id === args.id);
-      if (idx === -1) throw new Error(`Todo "${args.id}" not found`);
-      const { id, ...updates } = args;
-      todos[idx] = { ...todos[idx], ...updates, updatedAt: new Date().toISOString() };
-      return { success: true, todo: todos[idx] };
+      const i = todos.findIndex(t => t.id === args.id);
+      if (i === -1) throw new Error('Todo not found: ' + args.id);
+      const { id, ...u } = args;
+      todos[i] = { ...todos[i], ...u, updatedAt: new Date().toISOString() };
+      return { success: true, todo: todos[i] };
     }
     case 'delete_todo': {
-      const idx = todos.findIndex(t => t.id === args.id);
-      if (idx === -1) throw new Error(`Todo "${args.id}" not found`);
-      todos.splice(idx, 1);
+      const i = todos.findIndex(t => t.id === args.id);
+      if (i === -1) throw new Error('Todo not found: ' + args.id);
+      todos.splice(i, 1);
       return { success: true };
     }
-    case 'get_notes': {
+    case 'get_notes':
       return { notes, count: notes.length };
-    }
     case 'create_note': {
-      if (!args.title || !args.content) throw new Error('title and content required');
-      const note = { id: uuidv4(), title: args.title, content: args.content, tags: args.tags || [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-      notes.push(note);
-      return { success: true, note };
+      if (!args.title || !args.content) throw new Error('title and content are required');
+      const n = { id: uid(), title: args.title, content: args.content, tags: args.tags || [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      notes.push(n);
+      return { success: true, note: n };
     }
     case 'update_note': {
-      const idx = notes.findIndex(n => n.id === args.id);
-      if (idx === -1) throw new Error(`Note "${args.id}" not found`);
-      const { id, ...updates } = args;
-      notes[idx] = { ...notes[idx], ...updates, updatedAt: new Date().toISOString() };
-      return { success: true, note: notes[idx] };
+      const i = notes.findIndex(n => n.id === args.id);
+      if (i === -1) throw new Error('Note not found: ' + args.id);
+      const { id, ...u } = args;
+      notes[i] = { ...notes[i], ...u, updatedAt: new Date().toISOString() };
+      return { success: true, note: notes[i] };
     }
     case 'delete_note': {
-      const idx = notes.findIndex(n => n.id === args.id);
-      if (idx === -1) throw new Error(`Note "${args.id}" not found`);
-      notes.splice(idx, 1);
+      const i = notes.findIndex(n => n.id === args.id);
+      if (i === -1) throw new Error('Note not found: ' + args.id);
+      notes.splice(i, 1);
       return { success: true };
     }
     default:
-      throw new Error(`Unknown tool: ${name}`);
+      throw new Error('Unknown tool: ' + name);
   }
 }
 
-// ─── Health check ──────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok', protocol: 'MCP-SSE' }));
+function handleRPC(body) {
+  const { id, method, params = {} } = body;
+  switch (method) {
+    case 'initialize':
+      return { id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'todo-notes-mcp', version: '1.0.0' } } };
+    case 'ping':
+      return { id, result: {} };
+    case 'tools/list':
+      return { id, result: { tools: TOOLS } };
+    case 'tools/call': {
+      const { name, arguments: args = {} } = params;
+      try {
+        const data = runTool(name, args);
+        return { id, result: { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] } };
+      } catch (e) {
+        return { id, result: { content: [{ type: 'text', text: 'Error: ' + e.message }], isError: true } };
+      }
+    }
+    default:
+      return { id, error: { code: -32601, message: 'Unknown method: ' + method } };
+  }
+}
 
-// ─── MCP SSE stream — ChatGPT connects here first ─────────────────────────────
-// ChatGPT sends Accept: text/event-stream → we open the SSE channel
-// and tell it where to POST JSON-RPC messages
-app.get('/', (req, res) => {
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', c => data += c);
+    req.on('end', () => { try { resolve(JSON.parse(data || '{}')); } catch (e) { reject(e); } });
+    req.on('error', reject);
+  });
+}
+
+function setCORS(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, Authorization, Mcp-Session-Id');
+  res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+}
+
+const server = http.createServer(async (req, res) => {
+  setCORS(res);
+
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+
+  const url = new URL(req.url, 'http://localhost');
+  const path = url.pathname;
   const accept = req.headers['accept'] || '';
 
-  if (!accept.includes('text/event-stream')) {
-    // Serve a simple status page for browser visits
-    return res.send(`
-      <!DOCTYPE html><html><head><title>Todo & Notes MCP</title>
-      <style>body{font-family:monospace;background:#0c0c0f;color:#c8f060;padding:40px;}</style></head>
-      <body>
-        <h1>✓ Todo & Notes MCP Server</h1>
-        <p>Status: <strong>Running</strong></p>
-        <p>Protocol: MCP over SSE (Model Context Protocol)</p>
-        <p>SSE endpoint: <code>GET /</code> with <code>Accept: text/event-stream</code></p>
-        <p>Message endpoint: <code>POST /message</code></p>
-        <p>Tools: get_todos, create_todo, update_todo, delete_todo, get_notes, create_note, update_note, delete_note</p>
-        <hr/>
-        <p><a href="/health" style="color:#60d0f0">/health</a></p>
-      </body></html>
-    `);
+  if (path === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ status: 'ok', protocol: 'MCP-SSE' }));
   }
 
-  // SSE handshake
-  const sessionId = uuidv4();
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Disables Railway/nginx buffering
-  res.setHeader('Mcp-Session-Id', sessionId);
-  res.flushHeaders();
-
-  // Tell the client where to POST JSON-RPC messages
-  const base = `${req.protocol}://${req.headers.host}`;
-  const endpointEvent = `event: endpoint\ndata: ${JSON.stringify({ uri: `${base}/message?sessionId=${sessionId}` })}\n\n`;
-  res.write(endpointEvent);
-
-  // Keep-alive
-  const ping = setInterval(() => res.write(`: ping\n\n`), 15000);
-  req.on('close', () => clearInterval(ping));
-});
-
-// ─── MCP JSON-RPC message handler ─────────────────────────────────────────────
-app.post('/message', (req, res) => {
-  const { jsonrpc, id, method, params = {} } = req.body;
-
-  if (jsonrpc !== '2.0') {
-    return res.status(400).json({ error: 'Expected JSON-RPC 2.0' });
+  // SSE stream — ChatGPT connects here
+  if (req.method === 'GET' && path === '/' && accept.includes('text/event-stream')) {
+    const sessionId = uid();
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+      'Mcp-Session-Id': sessionId,
+    });
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const base = proto + '://' + host;
+    res.write('event: endpoint\ndata: ' + JSON.stringify({ uri: base + '/message?sessionId=' + sessionId }) + '\n\n');
+    const ping = setInterval(() => res.write(': ping\n\n'), 20000);
+    req.on('close', () => clearInterval(ping));
+    return;
   }
 
-  try {
-    let result;
-
-    switch (method) {
-      case 'initialize':
-        result = {
-          protocolVersion: '2024-11-05',
-          capabilities: { tools: {} },
-          serverInfo: { name: 'todo-notes-mcp', version: '1.0.0' }
-        };
-        break;
-
-      case 'notifications/initialized':
-        return res.status(204).send();
-
-      case 'ping':
-        result = {};
-        break;
-
-      case 'tools/list':
-        result = { tools: TOOLS };
-        break;
-
-      case 'tools/call': {
-        const { name, arguments: args = {} } = params;
-        try {
-          const data = executeTool(name, args);
-          result = { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-        } catch (e) {
-          result = { content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true };
-        }
-        break;
-      }
-
-      default:
-        return res.json({ jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown method: ${method}` } });
+  // JSON-RPC messages
+  if (req.method === 'POST' && path === '/message') {
+    try {
+      const body = await readBody(req);
+      if (body.method === 'notifications/initialized') { res.writeHead(204); return res.end(); }
+      const rpc = handleRPC(body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ jsonrpc: '2.0', ...rpc }));
+    } catch (e) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: e.message } }));
     }
-
-    res.json({ jsonrpc: '2.0', id, result });
-
-  } catch (err) {
-    res.json({ jsonrpc: '2.0', id, error: { code: -32603, message: err.message } });
   }
+
+  // Browser page
+  if (req.method === 'GET' && path === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    return res.end(`<!DOCTYPE html><html><head><title>Todo & Notes MCP</title>
+<style>body{font-family:monospace;background:#0c0c0f;color:#c8f060;padding:48px;line-height:2}
+code{background:#1a1a22;padding:2px 8px;border-radius:4px;color:#60d0f0}a{color:#60d0f0}</style></head>
+<body><h1>✓ Todo & Notes MCP Server</h1>
+<p>Status: <strong style="color:#80e080">Running</strong></p>
+<p>SSE: <code>GET /</code> with <code>Accept: text/event-stream</code></p>
+<p>RPC: <code>POST /message</code></p>
+<p>Health: <a href="/health">/health</a></p>
+<p style="color:#666">Tools: get_todos · create_todo · update_todo · delete_todo · get_notes · create_note · update_note · delete_note</p>
+</body></html>`);
+  }
+
+  res.writeHead(404); res.end('Not found');
 });
 
-app.listen(PORT, () => {
-  console.log(`MCP Todo & Notes server on port ${PORT}`);
-});
+server.listen(PORT, () => console.log('MCP server on port ' + PORT));
