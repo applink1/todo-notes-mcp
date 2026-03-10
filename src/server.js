@@ -98,120 +98,61 @@ async function initDB() {
   }
 }
 
-// ─── Gmail SMTP/TLS — fully RFC-compliant ────────────────────────────────────
-const GMAIL_USER = process.env.GMAIL_USER || '';
-const GMAIL_PASS = process.env.GMAIL_APP_PASSWORD || '';
+
+// ─── Email via Resend.com HTTP API (port 443 — works on Railway) ──────────────
+// Railway BLOCKS outbound SMTP (ports 465/587). Use Resend instead.
+// Free tier: 3,000 emails/month — get key at resend.com (takes 2 minutes)
+const RESEND_KEY = process.env.RESEND_API_KEY || '';
+const GMAIL_USER = process.env.GMAIL_USER || '';  // used as "from" address
 
 function sendGmail(to, subject, bodyText) {
   return new Promise((resolve, reject) => {
-    if (!GMAIL_USER || !GMAIL_PASS)
-      return reject(new Error('Gmail not configured. Set GMAIL_USER + GMAIL_APP_PASSWORD in Railway env vars.'));
-
-    const tls = require('tls');
-
-    // Build RFC 2822 message with proper CRLF line endings
-    const msgLines = [
-      `From: ${GMAIL_USER}`,
-      `To: ${to}`,
-      `Subject: ${subject}`,
-      `MIME-Version: 1.0`,
-      `Content-Type: text/plain; charset=UTF-8`,
-      ``,  // blank line separates headers from body
-      // Normalise body line endings to CRLF
-      ...bodyText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n'),
-    ];
-
-    // RFC 2821 dot-stuffing: escape lines starting with '.'
-    const stuffedLines = msgLines.map(l => l.startsWith('.') ? '.' + l : l);
-
-    // Full DATA payload: message lines + terminating CRLF.CRLF
-    const dataPayload = stuffedLines.join('\r\n') + '\r\n.\r\n';
-
-    // AUTH PLAIN: \0user\0password as base64
-    const authPlain = Buffer.from(
-      `\x00${GMAIL_USER}\x00${GMAIL_PASS.replace(/\s/g, '')}`
-    ).toString('base64');
-
-    let step     = 0;
-    let resolved = false;
-    let socket;
-
-    function done(err) {
-      if (resolved) return;
-      resolved = true;
-      try { socket.destroy(); } catch(_) {}
-      if (err) reject(err); else resolve({ ok: true });
+    if (!RESEND_KEY) {
+      return reject(new Error(
+        'Email not configured. Add RESEND_API_KEY to Railway env vars.\n' +
+        'Get a free key at resend.com — takes 2 minutes.'
+      ));
     }
 
-    // Write a command line
-    const cmd = s => {
-      console.log(`[SMTP →] ${s.startsWith('AUTH') ? 'AUTH PLAIN ***' : s}`);
-      socket.write(s + '\r\n');
-    };
+    // "From" address: if you have a custom domain on Resend use that,
+    // otherwise Resend's shared domain works fine for testing
+    const from = GMAIL_USER
+      ? `Outreach <${GMAIL_USER}>`
+      : 'Outreach <onboarding@resend.dev>';
 
-    // Send the DATA payload (already has its own terminating CRLF)
-    const sendData = () => {
-      console.log(`[SMTP →] <message body + dot terminator>`);
-      socket.write(dataPayload);
-    };
+    const payload = JSON.stringify({ from, to: [to], subject, text: bodyText });
 
-    function handleLine(line) {
-      const code = line.slice(0, 3);
-      console.log(`[SMTP ←] ${line}`);
-
-      // Any 5xx = permanent failure
-      if (code[0] === '5') return done(new Error(`SMTP error: ${line}`));
-
-      switch (step) {
-        case 0: // waiting for greeting
-          if (code === '220') { cmd('EHLO mcp-server'); step = 1; }
-          break;
-        case 1: // EHLO response (multi-line — wait for '250 ' final line)
-          if (line.startsWith('250 ')) { cmd('AUTH PLAIN ' + authPlain); step = 2; }
-          break;
-        case 2: // AUTH response
-          if (code === '235') { cmd(`MAIL FROM:<${GMAIL_USER}>`); step = 3; }
-          else if (code === '535') done(new Error('Gmail auth failed — wrong App Password?'));
-          break;
-        case 3: // MAIL FROM response
-          if (code === '250') { cmd(`RCPT TO:<${to}>`); step = 4; }
-          break;
-        case 4: // RCPT TO response
-          if (code === '250') { cmd('DATA'); step = 5; }
-          else if (code === '550') done(new Error(`Recipient rejected: ${line}`));
-          break;
-        case 5: // DATA start response
-          if (code === '354') { sendData(); step = 6; }
-          break;
-        case 6: // message accepted
-          if (code === '250') { cmd('QUIT'); step = 7; }
-          break;
-        case 7: // QUIT acknowledged
-          done(null); // success
-          break;
-      }
-    }
-
-    // Connect with implicit TLS (port 465 = SMTPS)
-    socket = tls.connect({ host: 'smtp.gmail.com', port: 465, servername: 'smtp.gmail.com' }, () => {
-      console.log('[SMTP] TLS connected');
+    const req = https.request({
+      hostname: 'api.resend.com',
+      port: 443,
+      path: '/emails',
+      method: 'POST',
+      headers: {
+        'Authorization':  `Bearer ${RESEND_KEY}`,
+        'Content-Type':   'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    }, res => {
+      let raw = '';
+      res.on('data', c => raw += c);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(raw);
+          if (res.statusCode >= 400) {
+            return reject(new Error(`Resend ${res.statusCode}: ${json.message || json.name || raw.slice(0,200)}`));
+          }
+          console.log(`[Email] Sent to ${to} — id: ${json.id}`);
+          resolve({ ok: true, id: json.id });
+        } catch(e) {
+          reject(new Error('Resend response parse error: ' + raw.slice(0, 200)));
+        }
+      });
     });
 
-    socket.setTimeout(25000, () => done(new Error('SMTP timeout after 25s')));
-    socket.on('error', err => done(new Error('SMTP socket error: ' + err.message)));
-    socket.on('close', () => { if (!resolved) done(new Error('SMTP socket closed unexpectedly')); });
-
-    let buf = '';
-    socket.on('data', chunk => {
-      buf += chunk.toString();
-      // Process complete lines only (terminated by \n)
-      const lines = buf.split('\n');
-      buf = lines.pop(); // last element may be incomplete
-      for (const raw of lines) {
-        const line = raw.replace(/\r$/, '').trim();
-        if (line) handleLine(line);
-      }
-    });
+    req.on('error', reject);
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Resend API timeout')); });
+    req.write(payload);
+    req.end();
   });
 }
 
@@ -603,7 +544,8 @@ async function runTool(name, args) {
         }
       }
       results.database_url_set = !!DATABASE_URL;
-      results.gmail_configured = !!(GMAIL_USER && GMAIL_PASS);
+      results.resend_configured = !!RESEND_KEY;
+        results.gmail_user = GMAIL_USER || '(not set)';
       return results;
     }
 
@@ -1012,7 +954,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/health') {
     let dbOk = false;
     try { await db('SELECT 1'); dbOk = true; } catch(_) {}
-    return sendJSON(res, 200, { status: 'ok', db: dbOk, gmail: !!(GMAIL_USER && GMAIL_PASS), version: '4.0.0' });
+    return sendJSON(res, 200, { status: 'ok', db: dbOk, email: !!(RESEND_KEY || GMAIL_USER), version: '4.0.0' });
   }
 
   // ── Dashboard API ──
