@@ -28,7 +28,7 @@ async function query(sql, params = []) {
       headers: {
         'Content-Type':  'application/json',
         'Authorization': `Basic ${auth}`,
-        'Neon-Database': database,
+        'Neon-Connection-String': NEON_URL,
         'Content-Length': Buffer.byteLength(body),
       }
     }, res => {
