@@ -3,7 +3,7 @@ const http  = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const PORT  = parseInt(process.env.PORT || '3000', 10);
-//abc
+
 // ─── Neon Postgres HTTP API ───────────────────────────────────────────────────
 const NEON_URL = process.env.DATABASE_URL;
 
