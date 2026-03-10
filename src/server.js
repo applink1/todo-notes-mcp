@@ -98,47 +98,119 @@ async function initDB() {
   }
 }
 
-// ─── Gmail SMTP/TLS ───────────────────────────────────────────────────────────
+// ─── Gmail SMTP/TLS — fully RFC-compliant ────────────────────────────────────
 const GMAIL_USER = process.env.GMAIL_USER || '';
 const GMAIL_PASS = process.env.GMAIL_APP_PASSWORD || '';
 
 function sendGmail(to, subject, bodyText) {
   return new Promise((resolve, reject) => {
     if (!GMAIL_USER || !GMAIL_PASS)
-      return reject(new Error('Gmail not configured. Set GMAIL_USER + GMAIL_APP_PASSWORD in Railway.'));
+      return reject(new Error('Gmail not configured. Set GMAIL_USER + GMAIL_APP_PASSWORD in Railway env vars.'));
 
     const tls = require('tls');
-    const msg = [
-      `From: ${GMAIL_USER}`, `To: ${to}`, `Subject: ${subject}`,
-      `MIME-Version: 1.0`, `Content-Type: text/plain; charset=UTF-8`, '', bodyText,
-    ].join('\r\n');
 
-    const authPlain = Buffer.from(`\x00${GMAIL_USER}\x00${GMAIL_PASS.replace(/\s/g, '')}`).toString('base64');
-    let step = 0;
+    // Build RFC 2822 message with proper CRLF line endings
+    const msgLines = [
+      `From: ${GMAIL_USER}`,
+      `To: ${to}`,
+      `Subject: ${subject}`,
+      `MIME-Version: 1.0`,
+      `Content-Type: text/plain; charset=UTF-8`,
+      ``,  // blank line separates headers from body
+      // Normalise body line endings to CRLF
+      ...bodyText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n'),
+    ];
+
+    // RFC 2821 dot-stuffing: escape lines starting with '.'
+    const stuffedLines = msgLines.map(l => l.startsWith('.') ? '.' + l : l);
+
+    // Full DATA payload: message lines + terminating CRLF.CRLF
+    const dataPayload = stuffedLines.join('\r\n') + '\r\n.\r\n';
+
+    // AUTH PLAIN: \0user\0password as base64
+    const authPlain = Buffer.from(
+      `\x00${GMAIL_USER}\x00${GMAIL_PASS.replace(/\s/g, '')}`
+    ).toString('base64');
+
+    let step     = 0;
+    let resolved = false;
     let socket;
-    const write = s => socket.write(s + '\r\n');
 
-    function handle(line) {
-      const code = line.slice(0, 3);
-      if (code[0] === '5') return reject(new Error('SMTP ' + line));
-      if (step === 0 && code === '220') { write('EHLO mcp-server'); step++; return; }
-      if (step === 1 && line.startsWith('250 ')) { write('AUTH PLAIN ' + authPlain); step++; return; }
-      if (step === 2 && code === '235') { write(`MAIL FROM:<${GMAIL_USER}>`); step++; return; }
-      if (step === 3 && code === '250') { write(`RCPT TO:<${to}>`); step++; return; }
-      if (step === 4 && code === '250') { write('DATA'); step++; return; }
-      if (step === 5 && code === '354') { write(msg + '\r\n.'); step++; return; }
-      if (step === 6 && code === '250') { write('QUIT'); resolve({ ok: true }); return; }
+    function done(err) {
+      if (resolved) return;
+      resolved = true;
+      try { socket.destroy(); } catch(_) {}
+      if (err) reject(err); else resolve({ ok: true });
     }
 
-    socket = tls.connect(465, 'smtp.gmail.com', {}, () => {});
-    socket.setTimeout(20000, () => { socket.destroy(); reject(new Error('SMTP timeout')); });
-    socket.on('error', reject);
+    // Write a command line
+    const cmd = s => {
+      console.log(`[SMTP →] ${s.startsWith('AUTH') ? 'AUTH PLAIN ***' : s}`);
+      socket.write(s + '\r\n');
+    };
+
+    // Send the DATA payload (already has its own terminating CRLF)
+    const sendData = () => {
+      console.log(`[SMTP →] <message body + dot terminator>`);
+      socket.write(dataPayload);
+    };
+
+    function handleLine(line) {
+      const code = line.slice(0, 3);
+      console.log(`[SMTP ←] ${line}`);
+
+      // Any 5xx = permanent failure
+      if (code[0] === '5') return done(new Error(`SMTP error: ${line}`));
+
+      switch (step) {
+        case 0: // waiting for greeting
+          if (code === '220') { cmd('EHLO mcp-server'); step = 1; }
+          break;
+        case 1: // EHLO response (multi-line — wait for '250 ' final line)
+          if (line.startsWith('250 ')) { cmd('AUTH PLAIN ' + authPlain); step = 2; }
+          break;
+        case 2: // AUTH response
+          if (code === '235') { cmd(`MAIL FROM:<${GMAIL_USER}>`); step = 3; }
+          else if (code === '535') done(new Error('Gmail auth failed — wrong App Password?'));
+          break;
+        case 3: // MAIL FROM response
+          if (code === '250') { cmd(`RCPT TO:<${to}>`); step = 4; }
+          break;
+        case 4: // RCPT TO response
+          if (code === '250') { cmd('DATA'); step = 5; }
+          else if (code === '550') done(new Error(`Recipient rejected: ${line}`));
+          break;
+        case 5: // DATA start response
+          if (code === '354') { sendData(); step = 6; }
+          break;
+        case 6: // message accepted
+          if (code === '250') { cmd('QUIT'); step = 7; }
+          break;
+        case 7: // QUIT acknowledged
+          done(null); // success
+          break;
+      }
+    }
+
+    // Connect with implicit TLS (port 465 = SMTPS)
+    socket = tls.connect({ host: 'smtp.gmail.com', port: 465, servername: 'smtp.gmail.com' }, () => {
+      console.log('[SMTP] TLS connected');
+    });
+
+    socket.setTimeout(25000, () => done(new Error('SMTP timeout after 25s')));
+    socket.on('error', err => done(new Error('SMTP socket error: ' + err.message)));
+    socket.on('close', () => { if (!resolved) done(new Error('SMTP socket closed unexpectedly')); });
+
     let buf = '';
     socket.on('data', chunk => {
       buf += chunk.toString();
-      const lines = buf.split('\r\n');
-      buf = lines.pop(); // keep incomplete line
-      for (const line of lines) { if (line) handle(line); }
+      // Process complete lines only (terminated by \n)
+      const lines = buf.split('\n');
+      buf = lines.pop(); // last element may be incomplete
+      for (const raw of lines) {
+        const line = raw.replace(/\r$/, '').trim();
+        if (line) handleLine(line);
+      }
     });
   });
 }
