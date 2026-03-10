@@ -1,415 +1,1057 @@
 'use strict';
-const http  = require('http');
-const https = require('https');
+const http   = require('http');
+const https  = require('https');
 const crypto = require('crypto');
-const PORT  = parseInt(process.env.PORT || '3000', 10);
+const PORT   = parseInt(process.env.PORT || '3000', 10);
 
-// ─── Neon Postgres HTTP API ──────────────────────────────────────────────────
-const NEON_URL = process.env.DATABASE_URL;
+// ─── Neon HTTP SQL API ────────────────────────────────────────────────────────
+// Correct format: POST https://{host}/sql
+// Header: Neon-Connection-String: postgresql://...
+// Body:   { query: "SELECT $1", params: ["val"] }
+// Returns: { rows: [...], rowCount: N, fields: [...] }
+const DATABASE_URL = process.env.DATABASE_URL || '';
 
-function parseNeonUrl(connStr) {
-  const u = new URL(connStr);
-  return {
-    hostname: u.hostname,
-    user:     decodeURIComponent(u.username),
-    password: decodeURIComponent(u.password),
-    database: u.pathname.replace(/^\//, ''),
-  };
-}
+async function db(sql, params = []) {
+  if (!DATABASE_URL) throw new Error('DATABASE_URL not set in Railway environment variables');
+  let hostname;
+  try { hostname = new URL(DATABASE_URL).hostname; }
+  catch(e) { throw new Error('DATABASE_URL is not a valid postgres URL'); }
 
-async function query(sql, params = []) {
-  if (!NEON_URL) throw new Error('DATABASE_URL not set');
-  const { hostname, user, password, database } = parseNeonUrl(NEON_URL);
   const body = JSON.stringify({ query: sql, params });
-  const auth = Buffer.from(`${user}:${password}`).toString('base64');
   return new Promise((resolve, reject) => {
     const req = https.request({
-      hostname, port: 443, path: '/sql', method: 'POST',
+      hostname,
+      port: 443,
+      path: '/sql',
+      method: 'POST',
       headers: {
-        'Content-Type':  'application/json',
-        'Authorization': `Basic ${auth}`,
-        'Neon-Connection-String': NEON_URL,
+        'Content-Type': 'application/json',
+        'Neon-Connection-String': DATABASE_URL,
         'Content-Length': Buffer.byteLength(body),
-      }
+      },
     }, res => {
       let raw = '';
       res.on('data', c => raw += c);
       res.on('end', () => {
         try {
           const json = JSON.parse(raw);
-          if (json.message) return reject(new Error(json.message));
+          // Neon error format
+          if (json.code || json.message) return reject(new Error(`DB: ${json.message || json.code}`));
           resolve(json.rows || []);
-        } catch(e) { reject(new Error('DB parse: ' + raw.slice(0,200))); }
+        } catch(e) {
+          reject(new Error(`DB parse error (status ${res.statusCode}): ${raw.slice(0, 300)}`));
+        }
       });
     });
     req.on('error', reject);
+    req.setTimeout(10000, () => { req.destroy(); reject(new Error('DB timeout')); });
     req.write(body);
     req.end();
   });
 }
 
-// ─── Gmail SMTP ───────────────────────────────────────────────────────────────
-const GMAIL_USER     = process.env.GMAIL_USER;
-const GMAIL_APP_PASS = process.env.GMAIL_APP_PASSWORD;
+// ─── DB Init: create tables if not exist ─────────────────────────────────────
+async function initDB() {
+  const tables = [
+    `CREATE TABLE IF NOT EXISTS leads (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name       TEXT NOT NULL,
+      email      TEXT,
+      company    TEXT,
+      website    TEXT,
+      niche      TEXT,
+      status     TEXT DEFAULT 'new'
+                 CHECK(status IN ('new','contacted','replied','qualified','closed_won','closed_lost')),
+      notes      TEXT,
+      source     TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS outreach (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      lead_id    UUID REFERENCES leads(id) ON DELETE CASCADE,
+      subject    TEXT,
+      body       TEXT,
+      sent_at    TIMESTAMPTZ,
+      status     TEXT DEFAULT 'draft' CHECK(status IN ('draft','sent','failed')),
+      error_msg  TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS followups (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      lead_id    UUID REFERENCES leads(id) ON DELETE CASCADE,
+      note       TEXT,
+      due_date   DATE NOT NULL,
+      done       BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`,
+  ];
+  for (const sql of tables) {
+    try { await db(sql); } catch(e) { console.error('[DB init]', e.message); }
+  }
+  // verify connection
+  try {
+    const rows = await db('SELECT COUNT(*) AS n FROM leads');
+    console.log(`[DB] Connected ✓  leads: ${rows[0].n}`);
+  } catch(e) {
+    console.error('[DB] Connection failed:', e.message);
+  }
+}
+
+// ─── Gmail SMTP/TLS ───────────────────────────────────────────────────────────
+const GMAIL_USER = process.env.GMAIL_USER || '';
+const GMAIL_PASS = process.env.GMAIL_APP_PASSWORD || '';
 
 function sendGmail(to, subject, bodyText) {
   return new Promise((resolve, reject) => {
-    if (!GMAIL_USER || !GMAIL_APP_PASS) return reject(new Error('Gmail not configured'));
+    if (!GMAIL_USER || !GMAIL_PASS)
+      return reject(new Error('Gmail not configured. Set GMAIL_USER + GMAIL_APP_PASSWORD in Railway.'));
+
     const tls = require('tls');
-    const rawMsg = [`From: ${GMAIL_USER}`,`To: ${to}`,`Subject: ${subject}`,
-      `MIME-Version: 1.0`,`Content-Type: text/plain; charset=UTF-8`,``,bodyText].join('\r\n');
-    const authB64 = Buffer.from(`\x00${GMAIL_USER}\x00${GMAIL_APP_PASS.replace(/\s/g,'')}`).toString('base64');
-    let step = 0, socket;
-    const send = s => socket.write(s + '\r\n');
+    const msg = [
+      `From: ${GMAIL_USER}`, `To: ${to}`, `Subject: ${subject}`,
+      `MIME-Version: 1.0`, `Content-Type: text/plain; charset=UTF-8`, '', bodyText,
+    ].join('\r\n');
+
+    const authPlain = Buffer.from(`\x00${GMAIL_USER}\x00${GMAIL_PASS.replace(/\s/g, '')}`).toString('base64');
+    let step = 0;
+    let socket;
+    const write = s => socket.write(s + '\r\n');
+
     function handle(line) {
-      line = line.trim();
-      if      (step===0 && line.startsWith('220'))  { send('EHLO mcp'); step++; }
-      else if (step===1 && line.startsWith('250 '))  { send('AUTH PLAIN '+authB64); step++; }
-      else if (step===2 && line.startsWith('235'))   { send(`MAIL FROM:<${GMAIL_USER}>`); step++; }
-      else if (step===3 && line.startsWith('250'))   { send(`RCPT TO:<${to}>`); step++; }
-      else if (step===4 && line.startsWith('250'))   { send('DATA'); step++; }
-      else if (step===5 && line.startsWith('354'))   { send(rawMsg+'\r\n.'); step++; }
-      else if (step===6 && line.startsWith('250'))   { send('QUIT'); resolve({success:true}); }
-      else if (line.startsWith('5'))                 { reject(new Error('SMTP: '+line)); }
+      const code = line.slice(0, 3);
+      if (code[0] === '5') return reject(new Error('SMTP ' + line));
+      if (step === 0 && code === '220') { write('EHLO mcp-server'); step++; return; }
+      if (step === 1 && line.startsWith('250 ')) { write('AUTH PLAIN ' + authPlain); step++; return; }
+      if (step === 2 && code === '235') { write(`MAIL FROM:<${GMAIL_USER}>`); step++; return; }
+      if (step === 3 && code === '250') { write(`RCPT TO:<${to}>`); step++; return; }
+      if (step === 4 && code === '250') { write('DATA'); step++; return; }
+      if (step === 5 && code === '354') { write(msg + '\r\n.'); step++; return; }
+      if (step === 6 && code === '250') { write('QUIT'); resolve({ ok: true }); return; }
     }
-    socket = tls.connect(465,'smtp.gmail.com',{},()=>{});
-    socket.setTimeout(15000,()=>reject(new Error('SMTP timeout')));
-    socket.on('error',reject);
-    let buf='';
-    socket.on('data',d=>{
-      buf+=d.toString();
-      buf.split('\r\n').forEach((l,i,arr)=>{ if(i<arr.length-1&&l) handle(l); });
-      buf=buf.includes('\r\n')?buf.slice(buf.lastIndexOf('\r\n')+2):buf;
+
+    socket = tls.connect(465, 'smtp.gmail.com', {}, () => {});
+    socket.setTimeout(20000, () => { socket.destroy(); reject(new Error('SMTP timeout')); });
+    socket.on('error', reject);
+    let buf = '';
+    socket.on('data', chunk => {
+      buf += chunk.toString();
+      const lines = buf.split('\r\n');
+      buf = lines.pop(); // keep incomplete line
+      for (const line of lines) { if (line) handle(line); }
     });
   });
 }
 
-// ─── DB Init ──────────────────────────────────────────────────────────────────
-async function initDB() {
-  const sqls = [
-    `CREATE TABLE IF NOT EXISTS leads (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      name TEXT NOT NULL, email TEXT, company TEXT, website TEXT,
-      niche TEXT, status TEXT DEFAULT 'new'
-        CHECK(status IN ('new','contacted','replied','qualified','closed_won','closed_lost')),
-      notes TEXT, source TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())`,
-    `CREATE TABLE IF NOT EXISTS outreach (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      lead_id UUID REFERENCES leads(id) ON DELETE CASCADE,
-      subject TEXT, body TEXT, sent_at TIMESTAMPTZ,
-      status TEXT DEFAULT 'draft' CHECK(status IN ('draft','sent','failed')),
-      created_at TIMESTAMPTZ DEFAULT NOW())`,
-    `CREATE TABLE IF NOT EXISTS followups (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      lead_id UUID REFERENCES leads(id) ON DELETE CASCADE,
-      note TEXT, due_date DATE NOT NULL, done BOOLEAN DEFAULT FALSE,
-      created_at TIMESTAMPTZ DEFAULT NOW())`,
-  ];
-  for (const sql of sqls) { try { await query(sql); } catch(e) { console.error('[DB]',e.message); } }
-  console.log('[DB] Ready');
+// ─── Lead finder data ─────────────────────────────────────────────────────────
+function getLeadIntel(niche, location) {
+  const loc = location || 'worldwide';
+  const n = niche.toLowerCase().trim();
+  const map = {
+    restaurant: {
+      pain: 'Paying 15–30% commission to Talabat/Uber Eats on every single order',
+      pitch: 'Your own ordering app pays for itself in 2 months vs Talabat commissions',
+      budget: '$2,000–$8,000',
+      linkedin: `"restaurant owner" OR "F&B manager" OR "food & beverage director" location:"${loc}"`,
+      where: [
+        `Talabat/Uber Eats top-rated restaurants in ${loc} — they pay the most in fees`,
+        `Google Maps: "restaurant" ${loc} — filter by 50+ reviews`,
+        `Instagram: food accounts in ${loc} with 2k+ followers but no ordering link in bio`,
+      ],
+      signals: ['2+ locations (growing chain)', 'Active Instagram but orders via WhatsApp', 'Posts complaining about delivery fees'],
+    },
+    gym: {
+      pain: 'Class bookings via WhatsApp, no member retention, manual check-in sheets',
+      pitch: 'Members book classes themselves, you get automated attendance and retention data',
+      budget: '$1,500–$6,000',
+      linkedin: `"gym owner" OR "fitness center" OR "CrossFit" OR "health club" location:"${loc}"`,
+      where: [
+        `Google Maps: "gym" OR "fitness center" OR "CrossFit" in ${loc}`,
+        `Instagram: fitness accounts in ${loc} without a booking app link`,
+        `Facebook Groups: fitness/gym owners in ${loc}`,
+      ],
+      signals: ['Uses WhatsApp for class scheduling', '100+ members', 'Has an Instagram but no app'],
+    },
+    'real estate': {
+      pain: 'Losing leads to Bayut/Zameen platform — clients save the portal, not the agency',
+      pitch: "Own your leads — clients bookmark YOUR app, not Bayut's listing",
+      budget: '$4,000–$15,000',
+      linkedin: `"real estate agency" OR "property developer" OR "real estate broker" location:"${loc}"`,
+      where: [
+        `Bayut/Zameen/Propertyfinder — top agencies in ${loc}`,
+        `LinkedIn: "real estate" companies in ${loc} with 5–50 employees`,
+        `Google: "property agency" ${loc} with their own website`,
+      ],
+      signals: ['5+ agents', 'Own website + active listings', 'No mobile app'],
+    },
+    ecommerce: {
+      pain: 'Selling via Instagram DMs or basic website — low mobile conversion, no repeat customers',
+      pitch: 'A branded shopping app gives 3x better conversion and builds a loyal customer base',
+      budget: '$2,500–$9,000',
+      linkedin: `"ecommerce" OR "online store" OR "shopify" location:"${loc}"`,
+      where: [
+        `Instagram shops in ${loc} with 5k+ followers`,
+        `Shopify stores in ${loc} — check with commerce inspector`,
+        `Facebook marketplace sellers scaling up in ${loc}`,
+      ],
+      signals: ['Active Instagram shop', 'Running paid ads', 'Sells physical products'],
+    },
+    startup: {
+      pain: 'Dev quotes are $50k+ and 6 months — MVP never launches',
+      pitch: 'Launch your MVP in 4 weeks for what others charge in 4 months',
+      budget: '$5,000–$20,000',
+      linkedin: `"founder" OR "co-founder" OR "CEO" "mobile app" OR "startup" location:"${loc}"`,
+      where: [
+        `ProductHunt — recent launches in ${loc} needing a mobile companion`,
+        `AngelList/Wellfound — seed-funded startups in ${loc}`,
+        `LinkedIn: "co-founder" + "app" in ${loc}`,
+      ],
+      signals: ['Raised seed funding', 'Job posting for Flutter/React Native dev', 'Web-only product with mobile demand'],
+    },
+    agency: {
+      pain: "Clients ask for mobile apps but can't deliver — turning down deals",
+      pitch: 'White-label partnership — you sell the project, I build it, you keep the margin',
+      budget: '$4,000–$18,000/project',
+      linkedin: `"digital agency" OR "web agency" OR "creative agency" OR "marketing agency" location:"${loc}"`,
+      where: [
+        `Clutch.co — digital agencies in ${loc}`,
+        `LinkedIn — "web agency" in ${loc} with 5–50 employees`,
+        `Upwork agencies posting mobile app projects`,
+      ],
+      signals: ['Web/design agency with no mobile services page', '5–50 employees', 'Active on LinkedIn'],
+    },
+    logistics: {
+      pain: 'Drivers on WhatsApp, no live tracking, manual proof of delivery',
+      pitch: 'Live GPS tracking + digital POD — eliminate WhatsApp dispatch in 4 weeks',
+      budget: '$5,000–$18,000',
+      linkedin: `"logistics" OR "courier service" OR "last mile delivery" OR "freight" location:"${loc}"`,
+      where: [
+        `Google: "courier company" OR "delivery service" in ${loc}`,
+        `LinkedIn: logistics companies in ${loc} with 10–100 employees`,
+        `E-commerce Facebook groups — delivery businesses advertising`,
+      ],
+      signals: ['10+ drivers', 'WhatsApp for dispatch coordination', 'Growing delivery volume'],
+    },
+    healthcare: {
+      pain: 'Appointments by phone call, no reminders, no digital patient records',
+      pitch: 'Patients book online 24/7, automated reminders cut no-shows by 40%',
+      budget: '$6,000–$25,000',
+      linkedin: `"clinic owner" OR "medical center" OR "private hospital" OR "polyclinic" location:"${loc}"`,
+      where: [
+        `Google: "private clinic" OR "medical center" in ${loc}`,
+        `LinkedIn: "clinic director" OR "medical director" in ${loc}`,
+        `Instagram: private clinics in ${loc} with active social media`,
+      ],
+      signals: ['Private clinic with 3+ doctors', 'Active Instagram/Facebook', 'No online booking system'],
+    },
+    school: {
+      pain: 'Parent communication via printed circulars and 10 different WhatsApp groups',
+      pitch: 'Replace all WhatsApp chaos with one professional school app parents will love',
+      budget: '$3,500–$12,000',
+      linkedin: `"school principal" OR "academy director" OR "private school" location:"${loc}"`,
+      where: [
+        `Google: "private school" OR "international school" in ${loc}`,
+        `LinkedIn: school principals/directors in ${loc}`,
+        `Facebook: parent groups for private schools in ${loc}`,
+      ],
+      signals: ['200+ students', 'Multiple WhatsApp parent groups', 'No dedicated school app'],
+    },
+  };
+
+  const info = map[n] || {
+    pain: `Manual processes and no mobile presence in the ${niche} sector`,
+    pitch: `Custom mobile app — iOS + Android in 3–4 weeks, 50–70% less than traditional dev`,
+    budget: '$2,000–$10,000',
+    linkedin: `"${niche}" location:"${loc}"`,
+    where: [`Google: "${niche}" companies in ${loc}`, `LinkedIn: "${niche}" in ${loc}`, `Instagram: ${niche} businesses in ${loc}`],
+    signals: ['Active social media', 'Website but no app', 'Growing business'],
+  };
+
+  return {
+    niche, location: loc,
+    THEIR_PAIN:       info.pain,
+    YOUR_PITCH:       info.pitch,
+    TYPICAL_BUDGET:   info.budget,
+    WHERE_TO_FIND:    info.where,
+    LINKEDIN_SEARCH:  info.linkedin,
+    BUYING_SIGNALS:   info.signals,
+    GOOGLE_SEARCHES: [
+      `"${niche}" company ${loc} site:linkedin.com`,
+      `"${niche}" "${loc}" "mobile app" -jobs`,
+      `"${niche}" "${loc}" "need an app" OR "looking for developer"`,
+    ],
+    OTHER_PLATFORMS: [
+      `Clutch.co → search "${niche}" + ${loc}`,
+      `ProductHunt → browse ${niche} category`,
+      `Upwork → find clients posting "${niche} app" projects`,
+      `Instagram → #${niche.replace(/\s+/g, '')} in ${loc}`,
+    ],
+    NEXT_STEP: `1. Search LinkedIn using the string above  2. Find 5–10 companies  3. add_lead for each  4. Say "run full outreach for all new leads" to automate emails`,
+  };
 }
 
-// ─── Tools ────────────────────────────────────────────────────────────────────
+// ─── Email composer ───────────────────────────────────────────────────────────
+function composeEmail(lead, opts = {}) {
+  const tone    = opts.tone || 'professional';
+  const service = opts.service || 'FlutterFlow mobile app development';
+  const extra   = opts.custom_note ? `\n${opts.custom_note}\n` : '';
+  const name    = lead.name || lead.company || 'there';
+  const co      = lead.company ? ` (${lead.company})` : '';
+  const niche   = lead.niche || 'your industry';
+
+  const subjects = {
+    professional: `Mobile app for ${lead.company || lead.name}`,
+    casual:       `Quick idea for ${lead.company || lead.name}`,
+    direct:       `App development for ${lead.company || lead.name}?`,
+    followup:     `Re: Mobile app for ${lead.company || lead.name}`,
+  };
+  const bodies = {
+    professional:
+`Hi ${name},
+
+I came across your work${co} and wanted to reach out.
+
+I specialise in ${service} — helping ${niche} businesses launch mobile products faster and more cost-effectively than traditional development.${extra}
+What I can offer:
+• iOS + Android app from a single FlutterFlow codebase
+• Production-ready in 3–4 weeks
+• Full backend, payments, and API integration included
+
+Would a quick 15-minute call make sense to see if there's a fit?
+
+Best regards`,
+
+    casual:
+`Hey ${name},
+
+Spotted your work${co} and thought I'd reach out directly.
+
+I build mobile apps with FlutterFlow — cuts development time by 70% without sacrificing quality.${extra}
+Happy to show you a quick demo. Worth a chat?
+
+Cheers`,
+
+    direct:
+`Hi ${name},
+
+Quick question — are you currently looking to build or improve a mobile app${co}?
+
+I build production-grade iOS + Android apps with FlutterFlow. Fast delivery, significantly lower cost.${extra}
+15 minutes this week?`,
+
+    followup:
+`Hi ${name},
+
+Following up on my message from last week — just wanted to make sure it didn't get buried.
+
+I'm happy to send a 2-minute screen recording showing exactly what an app could look like for ${lead.company || lead.name} — no call needed.
+
+Still worth exploring?
+
+Best regards`,
+  };
+
+  return {
+    subject: subjects[tone] || subjects.professional,
+    body:    bodies[tone]   || bodies.professional,
+  };
+}
+
+// ─── MCP Tools ────────────────────────────────────────────────────────────────
 const TOOLS = [
-  { name:'add_lead', description:'Add a new lead to your sales pipeline.',
-    inputSchema:{ type:'object', required:['name'], properties:{
-      name:{type:'string'}, email:{type:'string'}, company:{type:'string'},
-      website:{type:'string'}, niche:{type:'string'}, notes:{type:'string'}, source:{type:'string'}}}},
-  { name:'get_leads', description:'List leads. Filter by status, niche, or search.',
-    inputSchema:{ type:'object', properties:{
-      status:{type:'string',enum:['new','contacted','replied','qualified','closed_won','closed_lost','all']},
-      niche:{type:'string'}, search:{type:'string'}, limit:{type:'number'}}}},
-  { name:'update_lead', description:'Update any field on a lead.',
-    inputSchema:{ type:'object', required:['id'], properties:{
-      id:{type:'string'}, status:{type:'string',enum:['new','contacted','replied','qualified','closed_won','closed_lost']},
-      email:{type:'string'}, company:{type:'string'}, website:{type:'string'}, notes:{type:'string'}, niche:{type:'string'}}}},
-  { name:'delete_lead', description:'Delete a lead.',
-    inputSchema:{ type:'object', required:['id'], properties:{ id:{type:'string'}}}},
-  { name:'find_flutterflow_leads',
-    description:'Find real potential clients for FlutterFlow/mobile app services. Returns WHERE to find them, buying signals, pitch angles, and LinkedIn search strings for any niche + location.',
-    inputSchema:{ type:'object', required:['niche'], properties:{
-      niche:{type:'string', description:'restaurant, gym, real estate, ecommerce, startup, agency, logistics, healthcare, school'},
-      location:{type:'string', description:'UAE, Pakistan, UK, Saudi Arabia, US, etc.'}}}},
-  { name:'draft_email', description:'Write a personalised cold email for a lead (does not send).',
-    inputSchema:{ type:'object', required:['lead_id'], properties:{
-      lead_id:{type:'string'}, tone:{type:'string',enum:['professional','casual','direct']},
-      service:{type:'string'}, custom_note:{type:'string'}}}},
-  { name:'send_email', description:'Send email to a lead via Gmail. Auto-updates status to contacted.',
-    inputSchema:{ type:'object', required:['lead_id','subject','body'], properties:{
-      lead_id:{type:'string'}, subject:{type:'string'}, body:{type:'string'}}}},
-  { name:'add_followup', description:'Schedule a follow-up reminder.',
-    inputSchema:{ type:'object', required:['lead_id','due_date'], properties:{
-      lead_id:{type:'string'}, due_date:{type:'string',description:'YYYY-MM-DD'}, note:{type:'string'}}}},
-  { name:'get_followups', description:'Get upcoming follow-up reminders.',
-    inputSchema:{ type:'object', properties:{ days_ahead:{type:'number'}, include_done:{type:'boolean'}}}},
-  { name:'complete_followup', description:'Mark a follow-up as done.',
-    inputSchema:{ type:'object', required:['id'], properties:{ id:{type:'string'}}}},
-  { name:'get_pipeline_stats', description:'Full pipeline summary with stats and conversion rates.',
-    inputSchema:{ type:'object', properties:{}}},
-  { name:'get_email_template', description:'Get a cold email template.',
-    inputSchema:{ type:'object', properties:{ type:{type:'string',enum:['cold_outreach','followup','reengagement','proposal']}, niche:{type:'string'}}}},
+  {
+    name: 'add_lead',
+    description: 'Add a new prospect to your pipeline.',
+    inputSchema: {
+      type: 'object', required: ['name'],
+      properties: {
+        name:    { type: 'string' },
+        email:   { type: 'string' },
+        company: { type: 'string' },
+        website: { type: 'string' },
+        niche:   { type: 'string', description: 'restaurant, gym, startup, agency, ecommerce, etc.' },
+        notes:   { type: 'string' },
+        source:  { type: 'string', description: 'linkedin, instagram, referral, cold_search, etc.' },
+      },
+    },
+  },
+  {
+    name: 'get_leads',
+    description: 'List leads. Filter by status, niche, or keyword.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['new','contacted','replied','qualified','closed_won','closed_lost','all'] },
+        niche:  { type: 'string' },
+        search: { type: 'string' },
+        limit:  { type: 'number' },
+      },
+    },
+  },
+  {
+    name: 'update_lead',
+    description: 'Update any field on a lead (status, email, company, notes, niche, website).',
+    inputSchema: {
+      type: 'object', required: ['id'],
+      properties: {
+        id:      { type: 'string' },
+        status:  { type: 'string', enum: ['new','contacted','replied','qualified','closed_won','closed_lost'] },
+        email:   { type: 'string' },
+        company: { type: 'string' },
+        website: { type: 'string' },
+        notes:   { type: 'string' },
+        niche:   { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'delete_lead',
+    description: 'Delete a lead.',
+    inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+  },
+  {
+    name: 'find_flutterflow_leads',
+    description: 'Get detailed intelligence on where to find FlutterFlow/mobile app clients for any niche and location. Returns LinkedIn search strings, buying signals, pain points, and pitch angles.',
+    inputSchema: {
+      type: 'object', required: ['niche'],
+      properties: {
+        niche:    { type: 'string', description: 'restaurant, gym, real estate, ecommerce, startup, agency, logistics, healthcare, school' },
+        location: { type: 'string', description: 'UAE, Pakistan, UK, Saudi Arabia, US, etc.' },
+      },
+    },
+  },
+  {
+    name: 'outreach_lead',
+    description: 'FULLY AUTOMATED: Draft AND send a cold email to a lead in one step. Also schedules a follow-up reminder automatically. Use this to run outreach without manual steps.',
+    inputSchema: {
+      type: 'object', required: ['lead_id'],
+      properties: {
+        lead_id:       { type: 'string' },
+        tone:          { type: 'string', enum: ['professional','casual','direct'], description: 'Default: professional' },
+        service:       { type: 'string', description: 'Service to pitch. Default: FlutterFlow mobile app development' },
+        custom_note:   { type: 'string', description: 'Any personalisation to add to the email' },
+        followup_days: { type: 'number', description: 'Days until follow-up reminder. Default: 4' },
+        send:          { type: 'boolean', description: 'Set to false to draft only, not send. Default: true' },
+      },
+    },
+  },
+  {
+    name: 'bulk_outreach',
+    description: 'FULLY AUTOMATED: Run outreach on ALL new leads at once. Drafts and sends emails + schedules follow-ups for every lead with status=new that has an email address.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tone:          { type: 'string', enum: ['professional','casual','direct'] },
+        service:       { type: 'string' },
+        followup_days: { type: 'number', description: 'Days until follow-up. Default: 4' },
+        dry_run:       { type: 'boolean', description: 'Set true to preview without sending. Default: false' },
+      },
+    },
+  },
+  {
+    name: 'send_followups',
+    description: 'FULLY AUTOMATED: Send follow-up emails to all leads that are overdue for follow-up (status=contacted, followup date passed). Marks each as done after sending.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        dry_run: { type: 'boolean', description: 'Preview without sending' },
+      },
+    },
+  },
+  {
+    name: 'add_followup',
+    description: 'Schedule a follow-up reminder for a specific lead.',
+    inputSchema: {
+      type: 'object', required: ['lead_id', 'due_date'],
+      properties: {
+        lead_id:  { type: 'string' },
+        due_date: { type: 'string', description: 'YYYY-MM-DD' },
+        note:     { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'get_followups',
+    description: 'Get upcoming follow-up reminders. Use every morning.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        days_ahead:   { type: 'number', description: 'Next N days (default 7)' },
+        include_done: { type: 'boolean' },
+      },
+    },
+  },
+  {
+    name: 'complete_followup',
+    description: 'Mark a follow-up as done.',
+    inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+  },
+  {
+    name: 'get_pipeline_stats',
+    description: 'Full pipeline summary: lead counts, conversion rates, emails sent.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_email_template',
+    description: 'Get a ready-to-use email template.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type:  { type: 'string', enum: ['cold_outreach','followup','reengagement','proposal'] },
+        niche: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'test_db',
+    description: 'Test the database connection and show table counts. Use this to debug DB issues.',
+    inputSchema: { type: 'object', properties: {} },
+  },
 ];
 
+// ─── Tool runners ─────────────────────────────────────────────────────────────
 async function runTool(name, args) {
-  switch(name) {
+  switch (name) {
+
+    case 'test_db': {
+      const results = {};
+      try {
+        await db('SELECT 1 AS ping');
+        results.connection = 'OK';
+      } catch(e) {
+        results.connection = 'FAILED: ' + e.message;
+        return results;
+      }
+      for (const table of ['leads','outreach','followups']) {
+        try {
+          const rows = await db(`SELECT COUNT(*) AS n FROM ${table}`);
+          results[table + '_count'] = parseInt(rows[0].n);
+        } catch(e) {
+          results[table] = 'table missing or error: ' + e.message;
+        }
+      }
+      results.database_url_set = !!DATABASE_URL;
+      results.gmail_configured = !!(GMAIL_USER && GMAIL_PASS);
+      return results;
+    }
 
     case 'add_lead': {
-      const rows = await query(
-        `INSERT INTO leads (name,email,company,website,niche,notes,source) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-        [args.name,args.email||null,args.company||null,args.website||null,args.niche||null,args.notes||null,args.source||null]
+      const rows = await db(
+        `INSERT INTO leads (name,email,company,website,niche,notes,source)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        [args.name, args.email||null, args.company||null, args.website||null,
+         args.niche||null, args.notes||null, args.source||null]
       );
-      return { success:true, lead:rows[0], message:`✓ "${args.name}" added` };
+      return { success: true, lead: rows[0], message: `✓ "${args.name}" added to pipeline` };
     }
 
     case 'get_leads': {
-      let sql=`SELECT l.*,(SELECT COUNT(*) FROM outreach WHERE lead_id=l.id AND status='sent') AS emails_sent,
-        (SELECT COUNT(*) FROM followups WHERE lead_id=l.id AND done=false) AS pending_followups
+      let sql = `SELECT l.*,
+        (SELECT COUNT(*) FROM outreach  WHERE lead_id=l.id AND status='sent') AS emails_sent,
+        (SELECT COUNT(*) FROM followups WHERE lead_id=l.id AND done=false)    AS pending_followups
         FROM leads l WHERE 1=1`;
-      const p=[];
-      if(args.status&&args.status!=='all'){p.push(args.status);sql+=` AND l.status=$${p.length}`;}
-      if(args.niche){p.push(`%${args.niche}%`);sql+=` AND l.niche ILIKE $${p.length}`;}
-      if(args.search){p.push(`%${args.search}%`);sql+=` AND (l.name ILIKE $${p.length} OR l.company ILIKE $${p.length} OR l.email ILIKE $${p.length})`;}
-      sql+=` ORDER BY l.updated_at DESC LIMIT $${p.length+1}`;p.push(args.limit||25);
-      const rows=await query(sql,p);
-      return {leads:rows,count:rows.length};
+      const p = [];
+      if (args.status && args.status !== 'all') { p.push(args.status); sql += ` AND l.status=$${p.length}`; }
+      if (args.niche)  { p.push(`%${args.niche}%`);  sql += ` AND l.niche ILIKE $${p.length}`; }
+      if (args.search) {
+        p.push(`%${args.search}%`);
+        sql += ` AND (l.name ILIKE $${p.length} OR l.company ILIKE $${p.length} OR l.email ILIKE $${p.length})`;
+      }
+      sql += ` ORDER BY l.updated_at DESC LIMIT $${p.length+1}`;
+      p.push(args.limit || 50);
+      const rows = await db(sql, p);
+      return { leads: rows, count: rows.length };
     }
 
     case 'update_lead': {
-      const sets=[],p=[];
-      for(const[k,v]of Object.entries(args)){
-        if(k!=='id'&&['status','email','company','website','notes','niche'].includes(k)&&v!==undefined){
-          p.push(v);sets.push(`${k}=$${p.length}`);
-        }
+      const allowed = ['status','email','company','website','notes','niche'];
+      const sets = [], p = [];
+      for (const k of allowed) {
+        if (args[k] !== undefined) { p.push(args[k]); sets.push(`${k}=$${p.length}`); }
       }
-      if(!sets.length) throw new Error('Nothing to update');
+      if (!sets.length) throw new Error('Nothing to update — provide at least one field');
       p.push(args.id);
-      const rows=await query(`UPDATE leads SET ${sets.join(',')},updated_at=NOW() WHERE id=$${p.length} RETURNING *`,p);
-      if(!rows.length) throw new Error('Lead not found');
-      return {success:true,lead:rows[0]};
+      const rows = await db(
+        `UPDATE leads SET ${sets.join(',')}, updated_at=NOW() WHERE id=$${p.length} RETURNING *`, p
+      );
+      if (!rows.length) throw new Error('Lead not found');
+      return { success: true, lead: rows[0], message: `✓ Lead updated` };
     }
 
     case 'delete_lead': {
-      await query(`DELETE FROM leads WHERE id=$1`,[args.id]);
-      return {success:true,message:'Deleted'};
+      await db(`DELETE FROM leads WHERE id=$1`, [args.id]);
+      return { success: true, message: 'Lead deleted' };
     }
 
     case 'find_flutterflow_leads': {
-      const n=args.niche.toLowerCase(), loc=args.location||'worldwide';
-      const db={
-        restaurant:{pain:'Paying 15-30% commission to Uber Eats/Talabat on every order',solution:'Own branded ordering app — zero commission, push notifications, loyalty program',budget:'$2k–$8k USD',linkedin:`"restaurant owner" OR "F&B director" OR "food & beverage" location:"${loc}"`,where:[`Talabat/Uber Eats listings in ${loc} (top-rated restaurants)`,`Google Maps "restaurant" ${loc} with 50+ reviews`,`Instagram food pages in ${loc} with 1k+ followers but no app link in bio`],signals:['2+ locations (growing chain)','Active Instagram but no app','Posts complaining about delivery fees'],pitch:'Your own ordering app pays for itself in 2 months vs Talabat commissions'},
-        gym:{pain:'Manual class bookings via WhatsApp, no member retention system',solution:'Member app with class booking, check-in, progress tracking, push notifications',budget:'$1.5k–$5k USD',linkedin:`"gym owner" OR "fitness center" OR "CrossFit box" location:"${loc}"`,where:[`Google Maps "gym" OR "crossfit" ${loc}`,`Instagram fitness accounts in ${loc}`,`Facebook gym groups in ${loc}`],signals:['Uses WhatsApp for class scheduling','100+ members','Active Instagram with no booking link'],pitch:'Replace WhatsApp chaos — members book themselves, you track everything'},
-        'real estate':{pain:'Listings on generic portals (Bayut/Zameen), losing leads to the platform',solution:'Branded property search app with virtual tours, lead capture, direct WhatsApp connect',budget:'$4k–$15k USD',linkedin:`"real estate agency" OR "property developer" location:"${loc}"`,where:[`Bayut/Zameen top agencies in ${loc}`,`LinkedIn "real estate" companies ${loc} with 10+ staff`,`Google "property agency" ${loc}`],signals:['Own website + active listings','5+ agents','No mobile app'],pitch:'Own your leads — clients save YOUR listings, not Bayut\'s'},
-        ecommerce:{pain:'Only on website/Instagram DMs, low mobile conversion',solution:'Branded shopping app — 3x conversion, push notifications, loyalty points',budget:'$2.5k–$9k USD',linkedin:`"ecommerce" OR "online store" OR "shopify store" location:"${loc}"`,where:[`Instagram shops in ${loc} with 5k+ followers`,`Shopify stores shipping to ${loc}`,`Facebook marketplace sellers in ${loc}`],signals:['Active Instagram shop','Shopify website','Running paid ads'],pitch:'Your Instagram DMs are not a sales system — a branded app 3x repeat purchases'},
-        startup:{pain:'Need an MVP fast but dev quotes are $50k+ and 6 months',solution:'FlutterFlow MVP in 3-4 weeks — real iOS + Android, at 50-70% less cost',budget:'$5k–$20k USD',linkedin:`"founder" OR "co-founder" "mobile app" OR "app" location:"${loc}"`,where:[`ProductHunt recent launches in ${loc}`,`AngelList/Wellfound ${loc} startups`,`LinkedIn "seed funded" startups ${loc}`],signals:['Raised seed funding','Job posting for Flutter dev','Web product needing mobile'],pitch:'Launch your MVP in 4 weeks for what others charge in 4 months'},
-        agency:{pain:'Clients ask for mobile apps but they can\'t deliver — losing deals',solution:'White-label FlutterFlow dev — agency sells, you build, everyone wins',budget:'$4k–$18k USD per project',linkedin:`"digital agency" OR "web agency" OR "creative agency" location:"${loc}"`,where:[`Clutch.co digital agencies in ${loc}`,`LinkedIn "web agency" ${loc} under 50 staff`,`Upwork agencies posting mobile app jobs`],signals:['Web/branding agency with no mobile services','Active LinkedIn','5-50 employees'],pitch:'Never turn down a mobile project again — I build, you bill, you keep the margin'},
-        logistics:{pain:'Drivers use WhatsApp, no live tracking, manual proof of delivery',solution:'Driver + customer tracking app — GPS, digital POD, automated updates',budget:'$5k–$18k USD',linkedin:`"logistics" OR "courier service" OR "last mile delivery" location:"${loc}"`,where:[`Google "courier company" OR "delivery service" ${loc}`,`LinkedIn logistics companies ${loc} with 10+ staff`,`E-commerce Facebook groups in ${loc}`],signals:['10+ drivers','WhatsApp for dispatch','Growing delivery volume'],pitch:'Replace WhatsApp dispatch with live GPS tracking — built in 4 weeks'},
-        healthcare:{pain:'Appointments via phone, no reminders, paper records',solution:'Patient app — booking, reminders, test results, teleconsult',budget:'$6k–$25k USD',linkedin:`"clinic" OR "medical center" OR "private hospital" location:"${loc}"`,where:[`Google "private clinic" ${loc}`,`LinkedIn "clinic owner" OR "medical director" ${loc}`,`Instagram private clinics in ${loc}`],signals:['Private clinic 3+ doctors','Active social media','No appointment app'],pitch:'Patients book 24/7 online, you cut no-shows by 40% with auto-reminders'},
-        school:{pain:'Parent comms via WhatsApp groups and printed circulars',solution:'School app — announcements, attendance, homework, fee payments, parent chat',budget:'$3.5k–$12k USD',linkedin:`"private school" OR "academy" OR "education" location:"${loc}"`,where:[`Google "private school" ${loc}`,`LinkedIn school principals/directors in ${loc}`,`Facebook parent groups in ${loc}`],signals:['200+ students','WhatsApp parent groups','No school app'],pitch:'Replace 10 WhatsApp groups with one professional school app'},
-      };
-      const info=db[n]||{pain:`Manual processes, no mobile presence`,solution:`Custom FlutterFlow app — iOS + Android in 3-4 weeks`,budget:'$2k–$10k USD',linkedin:`"${n}" location:"${loc}"`,where:[`Google "${n}" companies ${loc}`,`LinkedIn "${n}" ${loc}`,`Instagram "${n}" in ${loc}`],signals:['Active social media','Website but no app','Growing business'],pitch:`Build a mobile app 3x faster and cheaper`};
-      return {
-        niche:args.niche, location:loc,
-        THEIR_PAIN: info.pain,
-        YOUR_SOLUTION: info.solution,
-        TYPICAL_BUDGET: info.budget,
-        WHERE_TO_FIND_THEM: info.where,
-        LINKEDIN_SEARCH_STRING: info.linkedin,
-        BUYING_SIGNALS: info.signals,
-        ONE_LINE_PITCH: info.pitch,
-        GOOGLE_SEARCHES:[`"${n}" company ${loc} site:linkedin.com`,`"${n}" ${loc} "need an app" OR "looking for developer"`,`"${n}" ${loc} "mobile app" -jobs -apple`],
-        OTHER_PLATFORMS:[`ProductHunt.com → browse ${n} category`,`Clutch.co → "${n}" + ${loc}`,`Upwork → clients posting "${n} app" jobs`,`Instagram → #${n.replace(/\s/g,'')}${loc.replace(/\s/g,'')}`],
-        NEXT_STEP:`Search LinkedIn using the string above → find 5-10 companies → add_lead for each → draft_email to start outreach today.`
-      };
+      return getLeadIntel(args.niche, args.location);
     }
 
-    case 'draft_email': {
-      const leads=await query(`SELECT * FROM leads WHERE id=$1`,[args.lead_id]);
-      if(!leads.length) throw new Error('Lead not found');
-      const L=leads[0];
-      const svc=args.service||'FlutterFlow mobile app development';
-      const tone=args.tone||'professional';
-      const extra=args.custom_note?`\n${args.custom_note}\n`:'';
-      const name=L.name||L.company||'there';
-      const co=L.company?` (${L.company})`:'';
-      const bodies={
-        professional:`Hi ${name},\n\nI came across your work${co} and wanted to reach out.\n\nI specialise in ${svc} — helping ${L.niche||'businesses'} launch mobile products faster and cheaper than traditional development.${extra}\nWhat I offer:\n• iOS + Android from one FlutterFlow codebase\n• Production-ready in 3–4 weeks\n• Full backend, payments, and API integration\n\nWould a 15-minute call make sense?\n\nBest regards`,
-        casual:`Hey ${name},\n\nSpotted your work${co} and thought I'd reach out.\n\nI build mobile apps using FlutterFlow — cuts dev time by 70% without sacrificing quality.${extra}\nHappy to show you a quick demo. Worth a chat?\n\nCheers`,
-        direct:`Hi ${name},\n\nAre you currently looking to build or improve a mobile app${co}?\n\nI build production-grade iOS + Android apps with FlutterFlow. Fast, cost-effective, real quality.${extra}\n15 minutes this week?`,
-      };
-      const subjects={professional:`Mobile app for ${L.company||L.name}`,casual:`Quick idea for ${L.company||L.name}`,direct:`App for ${L.company||L.name}?`};
-      const subject=subjects[tone]||subjects.professional;
-      const body=bodies[tone]||bodies.professional;
-      await query(`INSERT INTO outreach (lead_id,subject,body,status) VALUES ($1,$2,$3,'draft')`,[args.lead_id,subject,body]);
-      return {draft:{subject,body,to:L.email,lead_name:L.name},message:`Draft saved. Use send_email with lead_id="${args.lead_id}" to send.`};
-    }
+    // ── FULLY AUTOMATED: single lead outreach ──
+    case 'outreach_lead': {
+      const leads = await db(`SELECT * FROM leads WHERE id=$1`, [args.lead_id]);
+      if (!leads.length) throw new Error('Lead not found');
+      const lead = leads[0];
+      if (!lead.email) throw new Error(`No email for "${lead.name}". Use update_lead to add email first.`);
 
-    case 'send_email': {
-      const leads=await query(`SELECT * FROM leads WHERE id=$1`,[args.lead_id]);
-      if(!leads.length) throw new Error('Lead not found');
-      const L=leads[0];
-      if(!L.email) throw new Error(`No email for "${L.name}" — use update_lead to add it first`);
-      let ok=false,errMsg='';
-      try{await sendGmail(L.email,args.subject,args.body);ok=true;}catch(e){errMsg=e.message;}
-      await query(`INSERT INTO outreach (lead_id,subject,body,sent_at,status) VALUES ($1,$2,$3,$4,$5)`,
-        [args.lead_id,args.subject,args.body,ok?new Date().toISOString():null,ok?'sent':'failed']);
-      if(ok){
-        await query(`UPDATE leads SET status='contacted',updated_at=NOW() WHERE id=$1`,[args.lead_id]);
-        return {success:true,message:`✓ Email sent to ${L.email}. Status → contacted.`};
+      const { subject, body } = composeEmail(lead, {
+        tone:        args.tone,
+        service:     args.service,
+        custom_note: args.custom_note,
+      });
+
+      const shouldSend = args.send !== false;
+      let sent = false, sendError = '';
+
+      if (shouldSend) {
+        try { await sendGmail(lead.email, subject, body); sent = true; }
+        catch(e) { sendError = e.message; }
       }
-      throw new Error(`Send failed: ${errMsg}`);
+
+      // Log the email
+      await db(
+        `INSERT INTO outreach (lead_id,subject,body,sent_at,status,error_msg) VALUES ($1,$2,$3,$4,$5,$6)`,
+        [lead.id, subject, body, sent ? new Date().toISOString() : null,
+         shouldSend ? (sent ? 'sent' : 'failed') : 'draft', sendError || null]
+      );
+
+      // Update status if sent
+      if (sent) {
+        await db(`UPDATE leads SET status='contacted', updated_at=NOW() WHERE id=$1`, [lead.id]);
+      }
+
+      // Auto-schedule follow-up
+      const followupDays = args.followup_days || 4;
+      const followupDate = new Date();
+      followupDate.setDate(followupDate.getDate() + followupDays);
+      const dueDateStr = followupDate.toISOString().slice(0, 10);
+
+      let followupId = null;
+      if (sent) {
+        const fu = await db(
+          `INSERT INTO followups (lead_id,due_date,note) VALUES ($1,$2,$3) RETURNING id`,
+          [lead.id, dueDateStr, `Follow up on cold email sent ${new Date().toLocaleDateString()}`]
+        );
+        followupId = fu[0]?.id;
+      }
+
+      return {
+        success:     shouldSend ? sent : true,
+        action:      shouldSend ? (sent ? 'sent' : 'failed') : 'drafted',
+        lead_name:   lead.name,
+        to:          lead.email,
+        subject,
+        body,
+        followup_scheduled: sent ? dueDateStr : null,
+        followup_id: followupId,
+        error:       sendError || null,
+        message:     sent
+          ? `✓ Email sent to ${lead.email}. Follow-up scheduled for ${dueDateStr}.`
+          : shouldSend
+          ? `✗ Send failed: ${sendError}. Email saved as draft.`
+          : `Draft saved. Call outreach_lead with send:true to send.`,
+      };
+    }
+
+    // ── FULLY AUTOMATED: bulk outreach to all new leads ──
+    case 'bulk_outreach': {
+      const newLeads = await db(
+        `SELECT * FROM leads WHERE status='new' AND email IS NOT NULL AND email != '' ORDER BY created_at ASC`
+      );
+      if (!newLeads.length) {
+        return { message: 'No new leads with email addresses found. Add leads first.', count: 0 };
+      }
+
+      const dryRun = args.dry_run === true;
+      const followupDays = args.followup_days || 4;
+      const results = { total: newLeads.length, sent: 0, failed: 0, skipped: 0, details: [] };
+
+      for (const lead of newLeads) {
+        const { subject, body } = composeEmail(lead, {
+          tone:    args.tone,
+          service: args.service,
+        });
+
+        if (dryRun) {
+          results.details.push({ lead: lead.name, email: lead.email, subject, action: 'dry_run' });
+          results.skipped++;
+          continue;
+        }
+
+        let sent = false, sendError = '';
+        try { await sendGmail(lead.email, subject, body); sent = true; }
+        catch(e) { sendError = e.message; }
+
+        await db(
+          `INSERT INTO outreach (lead_id,subject,body,sent_at,status,error_msg) VALUES ($1,$2,$3,$4,$5,$6)`,
+          [lead.id, subject, body, sent ? new Date().toISOString() : null,
+           sent ? 'sent' : 'failed', sendError || null]
+        );
+
+        if (sent) {
+          await db(`UPDATE leads SET status='contacted', updated_at=NOW() WHERE id=$1`, [lead.id]);
+          const followupDate = new Date();
+          followupDate.setDate(followupDate.getDate() + followupDays);
+          await db(
+            `INSERT INTO followups (lead_id,due_date,note) VALUES ($1,$2,$3)`,
+            [lead.id, followupDate.toISOString().slice(0,10),
+             `Follow up on cold email sent ${new Date().toLocaleDateString()}`]
+          );
+          results.sent++;
+        } else {
+          results.failed++;
+        }
+
+        results.details.push({
+          lead:    lead.name,
+          email:   lead.email,
+          subject,
+          action:  sent ? 'sent' : 'failed',
+          error:   sendError || null,
+        });
+
+        // Small delay between sends to avoid Gmail rate limits
+        await new Promise(r => setTimeout(r, 1500));
+      }
+
+      return {
+        ...results,
+        message: dryRun
+          ? `Dry run: would send to ${results.total} leads`
+          : `✓ Bulk outreach done: ${results.sent} sent, ${results.failed} failed. Follow-ups scheduled for ${results.sent} leads.`,
+      };
+    }
+
+    // ── FULLY AUTOMATED: send follow-up emails ──
+    case 'send_followups': {
+      const dryRun = args.dry_run === true;
+      // Get overdue follow-ups for leads that are still in contacted status
+      const overdue = await db(`
+        SELECT f.id AS followup_id, f.note, f.due_date,
+               l.id AS lead_id, l.name, l.email, l.company, l.niche, l.status
+        FROM followups f
+        JOIN leads l ON l.id = f.lead_id
+        WHERE f.done = false
+          AND f.due_date <= CURRENT_DATE
+          AND l.status = 'contacted'
+          AND l.email IS NOT NULL
+        ORDER BY f.due_date ASC
+        LIMIT 20
+      `);
+
+      if (!overdue.length) {
+        return { message: 'No overdue follow-ups for contacted leads. Check back tomorrow!', count: 0 };
+      }
+
+      const results = { total: overdue.length, sent: 0, failed: 0, details: [] };
+
+      for (const fu of overdue) {
+        const { subject, body } = composeEmail(fu, { tone: 'followup' });
+
+        if (dryRun) {
+          results.details.push({ lead: fu.name, email: fu.email, subject, action: 'dry_run' });
+          continue;
+        }
+
+        let sent = false, sendError = '';
+        try { await sendGmail(fu.email, subject, body); sent = true; }
+        catch(e) { sendError = e.message; }
+
+        await db(
+          `INSERT INTO outreach (lead_id,subject,body,sent_at,status,error_msg) VALUES ($1,$2,$3,$4,$5,$6)`,
+          [fu.lead_id, subject, body, sent ? new Date().toISOString() : null,
+           sent ? 'sent' : 'failed', sendError || null]
+        );
+
+        if (sent) {
+          await db(`UPDATE followups SET done=true WHERE id=$1`, [fu.followup_id]);
+          // Schedule second follow-up in 5 days if no reply
+          const nextDate = new Date();
+          nextDate.setDate(nextDate.getDate() + 5);
+          await db(
+            `INSERT INTO followups (lead_id,due_date,note) VALUES ($1,$2,$3)`,
+            [fu.lead_id, nextDate.toISOString().slice(0,10), 'Final follow-up (2nd attempt)']
+          );
+          results.sent++;
+        } else {
+          results.failed++;
+        }
+
+        results.details.push({ lead: fu.name, email: fu.email, subject, action: sent ? 'sent' : 'failed', error: sendError || null });
+        await new Promise(r => setTimeout(r, 1500));
+      }
+
+      return {
+        ...results,
+        message: dryRun
+          ? `Dry run: would follow up with ${results.total} leads`
+          : `✓ Follow-ups done: ${results.sent} sent, ${results.failed} failed.`,
+      };
     }
 
     case 'add_followup': {
-      const rows=await query(`INSERT INTO followups (lead_id,due_date,note) VALUES ($1,$2,$3) RETURNING *`,
-        [args.lead_id,args.due_date,args.note||null]);
-      const lead=await query(`SELECT name FROM leads WHERE id=$1`,[args.lead_id]);
-      return {success:true,followup:rows[0],message:`✓ Follow-up set for ${args.due_date} with ${lead[0]?.name}`};
+      const rows = await db(
+        `INSERT INTO followups (lead_id,due_date,note) VALUES ($1,$2,$3) RETURNING *`,
+        [args.lead_id, args.due_date, args.note || null]
+      );
+      const lead = await db(`SELECT name FROM leads WHERE id=$1`, [args.lead_id]);
+      return { success: true, followup: rows[0], message: `✓ Follow-up set for ${args.due_date} with ${lead[0]?.name}` };
     }
 
     case 'get_followups': {
-      const days=parseInt(args.days_ahead)||7;
-      const doneFilter=args.include_done?'':'AND f.done=false';
-      const rows=await query(
-        `SELECT f.*,l.name AS lead_name,l.email AS lead_email,l.company,l.status AS lead_status
-         FROM followups f JOIN leads l ON l.id=f.lead_id
-         WHERE f.due_date<=CURRENT_DATE+($1||' days')::INTERVAL ${doneFilter}
-         ORDER BY f.due_date ASC LIMIT 50`,[days]);
-      const overdue=rows.filter(r=>new Date(r.due_date)<new Date()).length;
-      return {followups:rows,count:rows.length,overdue,message:`${rows.length} follow-ups in next ${days} days (${overdue} overdue)`};
+      const days = parseInt(args.days_ahead) || 7;
+      const done = args.include_done ? '' : 'AND f.done=false';
+      const rows = await db(`
+        SELECT f.*, l.name AS lead_name, l.email AS lead_email, l.company, l.status AS lead_status
+        FROM followups f JOIN leads l ON l.id=f.lead_id
+        WHERE f.due_date <= CURRENT_DATE + ($1 || ' days')::INTERVAL ${done}
+        ORDER BY f.due_date ASC LIMIT 50`, [days]
+      );
+      const overdue = rows.filter(r => new Date(r.due_date) < new Date()).length;
+      return { followups: rows, count: rows.length, overdue, message: `${rows.length} follow-ups in next ${days} days (${overdue} overdue)` };
     }
 
     case 'complete_followup': {
-      const rows=await query(`UPDATE followups SET done=true WHERE id=$1 RETURNING id`,[args.id]);
-      if(!rows.length) throw new Error('Not found');
-      return {success:true,message:'✓ Done'};
+      const rows = await db(`UPDATE followups SET done=true WHERE id=$1 RETURNING id`, [args.id]);
+      if (!rows.length) throw new Error('Follow-up not found');
+      return { success: true, message: '✓ Follow-up marked done' };
     }
 
     case 'get_pipeline_stats': {
-      const[stats,tot,emails,fups,recent]=await Promise.all([
-        query(`SELECT status,COUNT(*) AS count FROM leads GROUP BY status`),
-        query(`SELECT COUNT(*) AS n FROM leads`),
-        query(`SELECT COUNT(*) AS n FROM outreach WHERE status='sent'`),
-        query(`SELECT COUNT(*) AS n FROM followups WHERE done=false`),
-        query(`SELECT name,company,status,updated_at FROM leads ORDER BY updated_at DESC LIMIT 6`),
+      const [stats, tot, emails, fups, recent] = await Promise.all([
+        db(`SELECT status, COUNT(*) AS count FROM leads GROUP BY status`),
+        db(`SELECT COUNT(*) AS n FROM leads`),
+        db(`SELECT COUNT(*) AS n FROM outreach WHERE status='sent'`),
+        db(`SELECT COUNT(*) AS n FROM followups WHERE done=false`),
+        db(`SELECT name, company, status, updated_at FROM leads ORDER BY updated_at DESC LIMIT 6`),
       ]);
-      const by={};stats.forEach(r=>{by[r.status]=parseInt(r.count);});
-      const total=parseInt(tot[0]?.n||0),won=by.closed_won||0;
-      return {total_leads:total,by_status:by,emails_sent:parseInt(emails[0]?.n||0),
-        pending_followups:parseInt(fups[0]?.n||0),
-        conversion_rate:total>0?`${Math.round(won/total*100)}%`:'0%',
-        contact_rate:total>0?`${Math.round(((by.contacted||0)+(by.replied||0)+(by.qualified||0)+won)/total*100)}%`:'0%',
-        recent_activity:recent};
+      const by = {};
+      stats.forEach(r => { by[r.status] = parseInt(r.count); });
+      const total = parseInt(tot[0]?.n || 0);
+      const won   = by.closed_won || 0;
+      const contacted = (by.contacted||0)+(by.replied||0)+(by.qualified||0)+won;
+      return {
+        total_leads:       total,
+        by_status:         by,
+        emails_sent:       parseInt(emails[0]?.n || 0),
+        pending_followups: parseInt(fups[0]?.n || 0),
+        conversion_rate:   total > 0 ? `${Math.round(won/total*100)}%` : '0%',
+        contact_rate:      total > 0 ? `${Math.round(contacted/total*100)}%` : '0%',
+        recent_activity:   recent,
+      };
     }
 
     case 'get_email_template': {
-      const n=args.niche||'businesses';
-      const t={
-        cold_outreach:{subject:`Quick idea for [Company]`,body:`Hi [Name],\n\nI noticed [specific thing — no app, WhatsApp orders, etc.].\n\nI build mobile apps for ${n} using FlutterFlow — iOS + Android in 3-4 weeks at 50-70% less than traditional dev.\n\n15-min call this week?\n\n[Your name]`,tips:['Personalise line 2 for every send','Under 80 words','One CTA only']},
-        followup:{subject:`Re: Quick idea for [Company]`,body:`Hi [Name],\n\nFollowing up from last week — happy to send a 2-min screen recording showing what an app would look like for [Company] if easier than a call.\n\nWorth a look?\n\n[Your name]`,tips:['Send 4-5 days after cold email','Offer video vs call','Max 2 follow-ups']},
-        reengagement:{subject:`Still thinking about an app for [Company]?`,body:`Hi [Name],\n\nReaching back out — just finished a similar project for a ${n} client: [specific result].\n\nIs mobile still on your radar?\n\n[Your name]`,tips:['2-3 months after silence','Lead with a real result','Short and casual']},
-        proposal:{subject:`Proposal: [App Name] for [Company]`,body:`Hi [Name],\n\nHere's a quick outline:\n\nSCOPE\n• iOS + Android app\n• Features: [1], [2], [3]\n• Built with FlutterFlow\n\nTIMELINE: 4 weeks\nINVESTMENT: [your price]\n\nNext step: confirm and I'll send the contract.\n\n[Your name]`,tips:['Keep scope tight','Single next step','Follow up in 2 days']},
+      const n = args.niche || 'businesses';
+      const templates = {
+        cold_outreach: {
+          subject: 'Quick idea for [Company]',
+          body: `Hi [Name],\n\nI noticed [something specific — no app, WhatsApp orders, etc.].\n\nI build mobile apps for ${n} using FlutterFlow — iOS + Android in 3–4 weeks at 50–70% less than traditional dev.\n\n15-min call this week?\n\n[Your name]`,
+          tips: ['Personalise line 2 for every send', 'Keep under 80 words', 'One CTA only'],
+        },
+        followup: {
+          subject: 'Re: Mobile app for [Company]',
+          body: `Hi [Name],\n\nFollowing up from last week — happy to send a 2-min screen recording showing what an app could look like for [Company] if easier than a call.\n\nStill worth exploring?\n\n[Your name]`,
+          tips: ['Send 4–5 days after cold email', 'Offer video vs call', 'Max 2 follow-ups'],
+        },
+        reengagement: {
+          subject: 'Still thinking about an app for [Company]?',
+          body: `Hi [Name],\n\nReaching back out — just wrapped up a similar project for a ${n} client: [specific result].\n\nIs mobile still on your radar?\n\n[Your name]`,
+          tips: ['2–3 months after silence', 'Lead with a real result', 'Short and casual'],
+        },
+        proposal: {
+          subject: 'Proposal: [App Name] for [Company]',
+          body: `Hi [Name],\n\nHere's a quick outline:\n\nSCOPE\n• iOS + Android app\n• Features: [1], [2], [3]\n• Built with FlutterFlow\n\nTIMELINE: 4 weeks\nINVESTMENT: [your price]\n\nNext step: confirm and I'll send the contract.\n\n[Your name]`,
+          tips: ['Keep scope to 3 features', 'One clear next step', 'Follow up in 2 days'],
+        },
       };
-      return {template:t[args.type||'cold_outreach'],all_types:Object.keys(t)};
+      const type = args.type || 'cold_outreach';
+      return { template: templates[type] || templates.cold_outreach, all_types: Object.keys(templates) };
     }
 
-    default: throw new Error('Unknown tool: '+name);
+    default:
+      throw new Error('Unknown tool: ' + name);
   }
 }
 
-// ─── Server boilerplate ───────────────────────────────────────────────────────
-const sessions=new Map();
-const uid=()=>crypto.randomUUID?crypto.randomUUID():crypto.randomBytes(16).toString('hex');
-const cors=res=>{res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Access-Control-Allow-Methods','GET,POST,DELETE,OPTIONS');res.setHeader('Access-Control-Allow-Headers','Content-Type,Accept,Authorization,Mcp-Session-Id');res.setHeader('Access-Control-Expose-Headers','Mcp-Session-Id');};
-const jsonRes=(res,code,obj)=>{res.writeHead(code,{'Content-Type':'application/json'});res.end(JSON.stringify(obj));};
-const readBody=req=>new Promise((ok,fail)=>{const c=[];req.on('data',d=>c.push(d));req.on('end',()=>{try{ok(JSON.parse(Buffer.concat(c).toString()||'null'));}catch(e){fail(e);}});req.on('error',fail);});
+// ─── MCP protocol boilerplate ─────────────────────────────────────────────────
+const sessions = new Map();
+const uid = () => crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
 
-async function handleRPC(msg,sid){
-  const{id,method,params={}}=msg;
-  if(method==='initialize'){sessions.set(sid,Date.now());return{id,result:{protocolVersion:'2024-11-05',capabilities:{tools:{}},serverInfo:{name:'leads-mcp',version:'3.0.0'}}};}
-  if(method==='notifications/initialized') return null;
-  if(method==='ping') return{id,result:{}};
-  if(method==='tools/list') return{id,result:{tools:TOOLS}};
-  if(method==='tools/call'){
-    const{name,arguments:a={}}=params;
-    try{const data=await runTool(name,a);return{id,result:{content:[{type:'text',text:JSON.stringify(data,null,2)}]}};}
-    catch(e){return{id,result:{content:[{type:'text',text:'❌ '+e.message}],isError:true}};}
-  }
-  return{id,error:{code:-32601,message:'Unknown method: '+method}};
+function setCors(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, Authorization, Mcp-Session-Id');
+  res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
 }
 
-const server=http.createServer(async(req,res)=>{
-  cors(res);
-  if(req.method==='OPTIONS'){res.writeHead(204);return res.end();}
-  let pathname='/';try{pathname=new URL(req.url,'http://x').pathname;}catch(_){}
-  const host=req.headers['x-forwarded-host']||req.headers['host']||'localhost';
-  const proto=(req.headers['x-forwarded-proto']||'https').split(',')[0].trim();
-  const base=`${proto}://${host}`;
+function sendJSON(res, code, obj) {
+  res.writeHead(code, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(obj));
+}
 
-  if(pathname==='/health'){
-    let dbOk=false;try{await query('SELECT 1');dbOk=true;}catch(_){}
-    return jsonRes(res,200,{status:'ok',db:dbOk,gmail:!!(GMAIL_USER&&GMAIL_APP_PASS)});
+function readBody(req) {
+  return new Promise((ok, fail) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      try { ok(JSON.parse(Buffer.concat(chunks).toString() || 'null')); }
+      catch(e) { fail(e); }
+    });
+    req.on('error', fail);
+  });
+}
+
+async function handleRPC(msg, sid) {
+  const { id, method, params = {} } = msg;
+  if (method === 'initialize') {
+    sessions.set(sid, Date.now());
+    return { id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'leads-mcp', version: '4.0.0' } } };
+  }
+  if (method === 'notifications/initialized') return null;
+  if (method === 'ping') return { id, result: {} };
+  if (method === 'tools/list') return { id, result: { tools: TOOLS } };
+  if (method === 'tools/call') {
+    const { name, arguments: a = {} } = params;
+    try {
+      const data = await runTool(name, a);
+      return { id, result: { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] } };
+    } catch(e) {
+      console.error(`[tool:${name}]`, e.message);
+      return { id, result: { content: [{ type: 'text', text: '❌ Error: ' + e.message }], isError: true } };
+    }
+  }
+  return { id, error: { code: -32601, message: 'Unknown method: ' + method } };
+}
+
+// ─── HTTP server ──────────────────────────────────────────────────────────────
+const server = http.createServer(async (req, res) => {
+  setCors(res);
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+
+  let pathname = '/';
+  try { pathname = new URL(req.url, 'http://x').pathname; } catch(_) {}
+
+  const host  = req.headers['x-forwarded-host'] || req.headers['host'] || 'localhost';
+  const proto = (req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
+  const base  = `${proto}://${host}`;
+
+  // ── Health ──
+  if (pathname === '/health') {
+    let dbOk = false;
+    try { await db('SELECT 1'); dbOk = true; } catch(_) {}
+    return sendJSON(res, 200, { status: 'ok', db: dbOk, gmail: !!(GMAIL_USER && GMAIL_PASS), version: '4.0.0' });
   }
 
-  if(pathname==='/api/stats'){
-    try{
-      const[stats,tot,emails,fups,recent]=await Promise.all([
-        query(`SELECT status,COUNT(*) AS count FROM leads GROUP BY status`),
-        query(`SELECT COUNT(*) AS n FROM leads`),
-        query(`SELECT COUNT(*) AS n FROM outreach WHERE status='sent'`),
-        query(`SELECT COUNT(*) AS n FROM followups WHERE done=false AND due_date<=CURRENT_DATE+'7 days'::INTERVAL`),
-        query(`SELECT name,company,status,updated_at FROM leads ORDER BY updated_at DESC LIMIT 8`),
+  // ── Dashboard API ──
+  if (pathname === '/api/stats') {
+    try {
+      const [stats, tot, emails, fups, recent] = await Promise.all([
+        db(`SELECT status, COUNT(*) AS count FROM leads GROUP BY status`),
+        db(`SELECT COUNT(*) AS n FROM leads`),
+        db(`SELECT COUNT(*) AS n FROM outreach WHERE status='sent'`),
+        db(`SELECT COUNT(*) AS n FROM followups WHERE done=false AND due_date<=CURRENT_DATE+'7 days'::INTERVAL`),
+        db(`SELECT name, company, status, updated_at FROM leads ORDER BY updated_at DESC LIMIT 8`),
       ]);
-      const byStatus={};stats.forEach(r=>{byStatus[r.status]=parseInt(r.count);});
-      return jsonRes(res,200,{byStatus,total:parseInt(tot[0]?.n||0),emailsSent:parseInt(emails[0]?.n||0),followupsDue:parseInt(fups[0]?.n||0),recent});
-    }catch(e){return jsonRes(res,200,{byStatus:{},total:0,emailsSent:0,followupsDue:0,recent:[],error:e.message});}
+      const byStatus = {};
+      stats.forEach(r => { byStatus[r.status] = parseInt(r.count); });
+      return sendJSON(res, 200, {
+        byStatus, recent,
+        total:        parseInt(tot[0]?.n   || 0),
+        emailsSent:   parseInt(emails[0]?.n || 0),
+        followupsDue: parseInt(fups[0]?.n  || 0),
+      });
+    } catch(e) {
+      return sendJSON(res, 200, { byStatus: {}, total: 0, emailsSent: 0, followupsDue: 0, recent: [], error: e.message });
+    }
   }
 
-  if(pathname==='/api/leads'){
-    try{return jsonRes(res,200,await query(`SELECT * FROM leads ORDER BY created_at DESC LIMIT 200`));}
-    catch(e){return jsonRes(res,500,{error:e.message});}
+  if (pathname === '/api/leads') {
+    try { return sendJSON(res, 200, await db(`SELECT * FROM leads ORDER BY created_at DESC LIMIT 200`)); }
+    catch(e) { return sendJSON(res, 500, { error: e.message }); }
   }
 
-  if(pathname==='/api/followups'){
-    try{return jsonRes(res,200,await query(`SELECT f.*,l.name AS lead_name,l.company FROM followups f JOIN leads l ON l.id=f.lead_id WHERE f.done=false ORDER BY f.due_date ASC LIMIT 30`));}
-    catch(e){return jsonRes(res,500,{error:e.message});}
+  if (pathname === '/api/followups') {
+    try {
+      return sendJSON(res, 200, await db(
+        `SELECT f.*, l.name AS lead_name, l.company FROM followups f
+         JOIN leads l ON l.id=f.lead_id WHERE f.done=false ORDER BY f.due_date ASC LIMIT 30`
+      ));
+    } catch(e) { return sendJSON(res, 500, { error: e.message }); }
   }
 
-  // OAuth passthrough (no real auth)
-  if(pathname==='/.well-known/oauth-authorization-server')
-    return jsonRes(res,200,{issuer:base,authorization_endpoint:`${base}/oauth/authorize`,token_endpoint:`${base}/oauth/token`,registration_endpoint:`${base}/oauth/register`,response_types_supported:['code'],grant_types_supported:['authorization_code'],code_challenge_methods_supported:['S256'],token_endpoint_auth_methods_supported:['none']});
-  if(req.method==='POST'&&pathname==='/oauth/register'){
-    let b={};try{b=await readBody(req);}catch(_){}
-    return jsonRes(res,201,{client_id:uid(),client_secret:uid(),client_name:b.client_name||'Client',redirect_uris:b.redirect_uris||[],grant_types:['authorization_code'],response_types:['code'],token_endpoint_auth_method:'none'});
+  // ── OAuth passthrough (no real auth — open) ──
+  if (pathname === '/.well-known/oauth-authorization-server') {
+    return sendJSON(res, 200, { issuer: base,
+      authorization_endpoint: `${base}/oauth/authorize`,
+      token_endpoint: `${base}/oauth/token`,
+      registration_endpoint: `${base}/oauth/register`,
+      response_types_supported: ['code'], grant_types_supported: ['authorization_code'],
+      code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'] });
   }
-  if(req.method==='GET'&&pathname==='/oauth/authorize'){
-    const u=new URL(req.url,base),r=u.searchParams.get('redirect_uri')||'',s=u.searchParams.get('state')||'';
-    res.writeHead(302,{Location:`${r}${r.includes('?')?'&':'?'}code=${uid()}${s?'&state='+encodeURIComponent(s):''}`});return res.end();
+  if (req.method === 'POST' && pathname === '/oauth/register') {
+    let b = {}; try { b = await readBody(req); } catch(_) {}
+    return sendJSON(res, 201, { client_id: uid(), client_secret: uid(),
+      client_name: b.client_name||'Client', redirect_uris: b.redirect_uris||[],
+      grant_types: ['authorization_code'], response_types: ['code'], token_endpoint_auth_method: 'none' });
   }
-  if(req.method==='POST'&&pathname==='/oauth/token')
-    return jsonRes(res,200,{access_token:'open-'+uid(),token_type:'bearer',expires_in:31536000});
+  if (req.method === 'GET' && pathname === '/oauth/authorize') {
+    const u = new URL(req.url, base);
+    const r = u.searchParams.get('redirect_uri') || '';
+    const s = u.searchParams.get('state') || '';
+    res.writeHead(302, { Location: `${r}${r.includes('?')?'&':'?'}code=${uid()}${s?'&state='+encodeURIComponent(s):''}` });
+    return res.end();
+  }
+  if (req.method === 'POST' && pathname === '/oauth/token') {
+    return sendJSON(res, 200, { access_token: 'open-'+uid(), token_type: 'bearer', expires_in: 31536000 });
+  }
 
-  // MCP
-  if(req.method==='POST'&&pathname==='/mcp'){
-    let body;try{body=await readBody(req);}catch(e){return jsonRes(res,400,{jsonrpc:'2.0',id:null,error:{code:-32700,message:'Parse error'}});}
-    let sid=req.headers['mcp-session-id'];if(!sid){sid=uid();res.setHeader('Mcp-Session-Id',sid);}
-    const msgs=Array.isArray(body)?body:[body],out=[];
-    for(const msg of msgs){if(!msg||msg.jsonrpc!=='2.0')continue;const r=await handleRPC(msg,sid);if(r)out.push({jsonrpc:'2.0',...r});}
-    if(!out.length){res.writeHead(204);return res.end();}
-    return jsonRes(res,200,Array.isArray(body)?out:out[0]);
-  }
-  if(req.method==='DELETE'&&pathname==='/mcp'){const sid=req.headers['mcp-session-id'];if(sid)sessions.delete(sid);res.writeHead(204);return res.end();}
-  if(req.method==='GET'&&pathname==='/mcp') return jsonRes(res,200,{transport:'streamable-http',protocolVersion:'2024-11-05',tools:TOOLS.length});
+  // ── MCP Streamable HTTP ──
+  if (req.method === 'POST' && pathname === '/mcp') {
+    let body;
+    try { body = await readBody(req); }
+    catch(e) { return sendJSON(res, 400, { jsonrpc:'2.0', id:null, error:{ code:-32700, message:'Parse error' } }); }
 
-  // Dashboard
-  if(req.method==='GET'&&(pathname==='/'||pathname==='/index.html')){
-    const fs=require('fs'),path=require('path');
-    try{const html=fs.readFileSync(path.join(__dirname,'..','public','index.html'),'utf8');res.writeHead(200,{'Content-Type':'text/html;charset=utf-8'});return res.end(html);}
-    catch(e){res.writeHead(404);return res.end('Dashboard not found');}
+    let sid = req.headers['mcp-session-id'];
+    if (!sid) { sid = uid(); res.setHeader('Mcp-Session-Id', sid); }
+
+    const msgs = Array.isArray(body) ? body : [body];
+    const out  = [];
+    for (const msg of msgs) {
+      if (!msg || msg.jsonrpc !== '2.0') continue;
+      const r = await handleRPC(msg, sid);
+      if (r) out.push({ jsonrpc: '2.0', ...r });
+    }
+    if (!out.length) { res.writeHead(204); return res.end(); }
+    return sendJSON(res, 200, Array.isArray(body) ? out : out[0]);
   }
-  res.writeHead(404);res.end('Not found');
+  if (req.method === 'DELETE' && pathname === '/mcp') {
+    const sid = req.headers['mcp-session-id'];
+    if (sid) sessions.delete(sid);
+    res.writeHead(204); return res.end();
+  }
+  if (req.method === 'GET' && pathname === '/mcp') {
+    return sendJSON(res, 200, { transport: 'streamable-http', protocolVersion: '2024-11-05', tools: TOOLS.length });
+  }
+
+  // ── Dashboard ──
+  if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
+    const fs   = require('fs');
+    const path = require('path');
+    try {
+      const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(html);
+    } catch(e) { res.writeHead(404); return res.end('Dashboard not found'); }
+  }
+
+  res.writeHead(404); res.end('Not found');
 });
 
-server.keepAliveTimeout=65000;server.headersTimeout=66000;
-server.listen(PORT,'0.0.0.0',async()=>{console.log(`[Leads MCP v3] Port ${PORT}`);await initDB();});
-server.on('error',err=>{console.error('[Fatal]',err);process.exit(1);});
+server.keepAliveTimeout = 65000;
+server.headersTimeout   = 66000;
+server.listen(PORT, '0.0.0.0', async () => {
+  console.log(`[Leads MCP v4] Listening on port ${PORT}`);
+  await initDB();
+});
+server.on('error', err => { console.error('[Fatal]', err); process.exit(1); });
