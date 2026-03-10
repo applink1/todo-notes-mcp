@@ -4,7 +4,7 @@ const https = require('https');
 const crypto = require('crypto');
 const PORT  = parseInt(process.env.PORT || '3000', 10);
 
-// ─── Neon Postgres HTTP API ───────────────────────────────────────────────────
+// ─── Neon Postgres HTTP API ──────────────────────────────────────────────────
 const NEON_URL = process.env.DATABASE_URL;
 
 function parseNeonUrl(connStr) {
