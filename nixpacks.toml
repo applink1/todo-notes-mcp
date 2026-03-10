@@ -1,5 +1,2 @@
-[phases.build]
-cmds = []
-
 [start]
 cmd = "node src/server.js"
