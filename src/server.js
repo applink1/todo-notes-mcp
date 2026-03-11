@@ -517,6 +517,43 @@ const TOOLS = [
     },
   },
   {
+    name: 'find_email',
+    description: 'Find the REAL verified email address for a person at a company using Hunter.io. Always use this before sending — never guess emails. Returns verified/unverified status.',
+    inputSchema: {
+      type: 'object', required: ['company_domain'],
+      properties: {
+        company_domain: { type: 'string', description: 'Company website domain e.g. "acmecorp.com" — no http://' },
+        first_name:     { type: 'string', description: 'Contact first name (optional but improves accuracy)' },
+        last_name:      { type: 'string', description: 'Contact last name (optional but improves accuracy)' },
+      },
+    },
+  },
+  {
+    name: 'verify_email',
+    description: 'Verify if an email address actually exists and is safe to send to. Use this on any email before sending — prevents bounces and protects your sender reputation.',
+    inputSchema: {
+      type: 'object', required: ['email'],
+      properties: {
+        email: { type: 'string', description: 'The email address to verify' },
+      },
+    },
+  },
+  {
+    name: 'find_and_add_lead',
+    description: 'FULLY AUTOMATED: Find a real verified email for a person/company using Hunter.io, verify it, then add them as a lead — all in one step. Use this instead of add_lead when you do not have a confirmed email.',
+    inputSchema: {
+      type: 'object', required: ['name', 'company_domain'],
+      properties: {
+        name:           { type: 'string', description: 'Contact full name' },
+        company_domain: { type: 'string', description: 'Company domain e.g. acmecorp.com' },
+        company:        { type: 'string', description: 'Company display name' },
+        niche:          { type: 'string' },
+        source:         { type: 'string' },
+        notes:          { type: 'string' },
+      },
+    },
+  },
+  {
     name: 'outreach_lead',
     description: 'FULLY AUTOMATED: Draft AND send a cold email to a lead in one step. Also schedules a follow-up reminder automatically. Use this to run outreach without manual steps.',
     inputSchema: {
@@ -719,12 +756,196 @@ async function runTool(name, args) {
       return getLeadIntel(args.niche, args.location);
     }
 
+    // ── Find real verified email via Hunter.io ──
+    case 'find_email': {
+      const HUNTER_KEY = process.env.HUNTER_API_KEY || '';
+      if (!HUNTER_KEY) {
+        return {
+          error: 'HUNTER_API_KEY not set',
+          setup: [
+            '1. Go to hunter.io → sign up free (25 searches/month)',
+            '2. Dashboard → API → copy your API key',
+            '3. Railway → Variables → add: HUNTER_API_KEY = your_key_here',
+            '4. Redeploy and try again',
+          ],
+          tip: 'Without Hunter, NEVER guess emails — always get them from LinkedIn profile, company website Contact page, or ask directly.',
+        };
+      }
+      const domain = args.company_domain.replace(/^https?:\/\//,'').replace(/\//g,'').trim();
+      return new Promise((resolve, reject) => {
+        let path = `/v2/domain-search?domain=${encodeURIComponent(domain)}&api_key=${HUNTER_KEY}&limit=5`;
+        if (args.first_name && args.last_name) {
+          path = `/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(args.first_name)}&last_name=${encodeURIComponent(args.last_name)}&api_key=${HUNTER_KEY}`;
+        }
+        const req = https.request({ hostname: 'api.hunter.io', port: 443, path, method: 'GET' }, res => {
+          let raw = '';
+          res.on('data', c => raw += c);
+          res.on('end', () => {
+            try {
+              const j = JSON.parse(raw);
+              if (j.errors) return resolve({ error: j.errors[0]?.details || 'Hunter error', raw: raw.slice(0,200) });
+              const d = j.data;
+              if (args.first_name && args.last_name) {
+                // Email finder response
+                resolve({
+                  email:        d.email,
+                  score:        d.score,          // confidence 0-100
+                  verified:     d.verification?.status || 'unknown',
+                  safe_to_send: (d.score >= 60 && d.verification?.status !== 'invalid'),
+                  first_name:   d.first_name,
+                  last_name:    d.last_name,
+                  position:     d.position,
+                  warning:      d.score < 60 ? 'Low confidence — verify before sending' : null,
+                });
+              } else {
+                // Domain search response — return all found emails
+                const emails = (d.emails || []).map(e => ({
+                  email:        e.value,
+                  first_name:   e.first_name,
+                  last_name:    e.last_name,
+                  position:     e.position,
+                  score:        e.confidence,
+                  verified:     e.verification?.status || 'unknown',
+                  safe_to_send: (e.confidence >= 60 && e.verification?.status !== 'invalid'),
+                }));
+                resolve({
+                  domain,
+                  pattern:      d.pattern,       // e.g. {first}.{last}@domain.com
+                  emails_found: emails.length,
+                  emails,
+                  tip: emails.length === 0
+                    ? 'No emails found. Try LinkedIn → view their profile → contact info tab.'
+                    : `Use the email with highest score and safe_to_send: true`,
+                });
+              }
+            } catch(e) { resolve({ error: 'Parse error: ' + raw.slice(0,200) }); }
+          });
+        });
+        req.on('error', e => resolve({ error: 'Network error: ' + e.message }));
+        req.setTimeout(15000, () => { req.destroy(); resolve({ error: 'Hunter timeout' }); });
+        req.end();
+      });
+    }
+
+    // ── Verify a specific email address ──
+    case 'verify_email': {
+      const HUNTER_KEY = process.env.HUNTER_API_KEY || '';
+      if (!HUNTER_KEY) return { error: 'HUNTER_API_KEY not set — see find_email tool for setup' };
+      const email = args.email.trim().toLowerCase();
+      return new Promise((resolve, reject) => {
+        const path = `/v2/email-verifier?email=${encodeURIComponent(email)}&api_key=${HUNTER_KEY}`;
+        const req = https.request({ hostname: 'api.hunter.io', port: 443, path, method: 'GET' }, res => {
+          let raw = '';
+          res.on('data', c => raw += c);
+          res.on('end', () => {
+            try {
+              const j = JSON.parse(raw);
+              if (j.errors) return resolve({ error: j.errors[0]?.details });
+              const d = j.data;
+              const status = d.status; // valid / invalid / accept_all / unknown
+              resolve({
+                email:        d.email,
+                status,
+                score:        d.score,
+                safe_to_send: status === 'valid' || (status === 'accept_all' && d.score > 50),
+                mx_records:   d.mx_records,
+                disposable:   d.disposable,
+                webmail:      d.webmail,
+                verdict: status === 'valid'
+                  ? '✅ Safe to send — email exists and accepts mail'
+                  : status === 'accept_all'
+                  ? '⚠️ Domain accepts all mail — may or may not exist, send with caution'
+                  : status === 'invalid'
+                  ? '❌ Do NOT send — email is invalid, will hard bounce'
+                  : '⚠️ Unknown — cannot verify, send at your own risk',
+              });
+            } catch(e) { resolve({ error: 'Parse error: ' + raw.slice(0,200) }); }
+          });
+        });
+        req.on('error', e => resolve({ error: 'Network error: ' + e.message }));
+        req.setTimeout(15000, () => { req.destroy(); resolve({ error: 'Verification timeout' }); });
+        req.end();
+      });
+    }
+
+    // ── Find real email + add as lead in one step ──
+    case 'find_and_add_lead': {
+      const HUNTER_KEY = process.env.HUNTER_API_KEY || '';
+      const nameParts  = args.name.trim().split(/\s+/);
+      const firstName  = nameParts[0] || '';
+      const lastName   = nameParts.slice(1).join(' ') || '';
+      const domain     = args.company_domain.replace(/^https?:\/\//,'').replace(/\//g,'').trim();
+
+      let emailData = null;
+      if (HUNTER_KEY && firstName && lastName) {
+        // Try exact email finder first
+        try {
+          emailData = await runTool('find_email', { company_domain: domain, first_name: firstName, last_name: lastName });
+        } catch(_) {}
+      } else if (HUNTER_KEY) {
+        // Try domain search
+        try {
+          const domainData = await runTool('find_email', { company_domain: domain });
+          if (domainData.emails && domainData.emails.length > 0) {
+            emailData = domainData.emails[0];
+          }
+        } catch(_) {}
+      }
+
+      const email      = emailData?.email || null;
+      const safeToSend = emailData?.safe_to_send || false;
+      const score      = emailData?.score || 0;
+
+      // Add lead regardless — but flag if email is missing/unsafe
+      const rows = await db(
+        `INSERT INTO leads (name, email, company, website, niche, notes, source)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        [
+          args.name,
+          email,
+          args.company || domain,
+          `https://${domain}`,
+          args.niche  || null,
+          args.notes  || (email ? null : 'EMAIL NEEDED — check LinkedIn or company website'),
+          args.source || null,
+        ]
+      );
+
+      return {
+        success:     true,
+        lead:        rows[0],
+        email_found: !!email,
+        email,
+        safe_to_send: safeToSend,
+        confidence:   score,
+        message: email && safeToSend
+          ? `✅ Lead added with verified email (${email}). Ready to outreach.`
+          : email && !safeToSend
+          ? `⚠️ Lead added but email confidence is low (score: ${score}). Verify manually before sending.`
+          : `⚠️ Lead added but NO email found. Find their email on LinkedIn or their website, then use update_lead to add it.`,
+        next_step: email && safeToSend
+          ? `Use outreach_lead with lead_id="${rows[0].id}" to send email`
+          : `Find real email on LinkedIn → update_lead id="${rows[0].id}" email="...@..."`,
+      };
+    }
+
     // ── FULLY AUTOMATED: single lead outreach ──
     case 'outreach_lead': {
       const leads = await db(`SELECT * FROM leads WHERE id=$1`, [args.lead_id]);
       if (!leads.length) throw new Error('Lead not found');
       const lead = leads[0];
-      if (!lead.email) throw new Error(`No email for "${lead.name}". Use update_lead to add email first.`);
+      if (!lead.email) throw new Error(
+        `No email for "${lead.name}". ` +
+        `Use find_and_add_lead or find_email with their company domain to get a real verified email first. ` +
+        `Never guess emails — guessed emails bounce and damage your sender reputation.`
+      );
+
+      // Warn if email looks guessed (common patterns people use)
+      const guessedPatterns = [/^info@/, /^contact@/, /^hello@/, /^admin@/, /^support@/];
+      const looksGuessed = guessedPatterns.some(p => p.test(lead.email));
+      if (looksGuessed && args.send !== false) {
+        console.warn(`[outreach] Warning: "${lead.email}" looks like a generic address — may bounce`);
+      }
 
       const { subject, body } = composeEmail(lead, {
         tone:        args.tone,
