@@ -101,72 +101,48 @@ async function initDB() {
 
 
 // ─── Email sending ────────────────────────────────────────────────────────────
-// Three methods tried in order:
-//   1. Resend API  (RESEND_API_KEY env var)
-//   2. Brevo API   (BREVO_API_KEY env var) — formerly Sendinblue, 300/day free
-//   3. Both missing → clear error message with setup instructions
+// Supports Brevo and Resend — both use HTTPS port 443 (works on Railway)
+// Brevo: brevo.com  — 300/day free, NO domain verification needed ← USE THIS
+// Resend: resend.com — 3,000/month free, needs verified domain for cold email
 const RESEND_KEY = process.env.RESEND_API_KEY || '';
 const BREVO_KEY  = process.env.BREVO_API_KEY  || '';
 const GMAIL_USER = process.env.GMAIL_USER     || '';
-const FROM_NAME  = process.env.FROM_NAME      || 'App Dev Agency';
+const FROM_NAME  = process.env.FROM_NAME      || 'App Developer';
 
-// ── Resend (resend.com — 3,000/month free) ────────────────────────────────────
-function sendViaResend(to, subject, text) {
-  return new Promise((resolve, reject) => {
-    // Without a verified domain, Resend only allows sending TO your own account email
-    // To send to anyone: verify a domain OR use RESEND_FROM_EMAIL with verified domain
-    const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
-    const from = `${FROM_NAME} <${fromEmail}>`;
-    const body = JSON.stringify({
-      from,
-      to: [to],
-      subject,
-      text,
-      reply_to: GMAIL_USER ? [GMAIL_USER] : undefined,
-    });
-    console.log('[Resend] Sending:', { to, from, subject });
-    const req = https.request({
-      hostname: 'api.resend.com', port: 443, path: '/emails', method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${RESEND_KEY}`,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body),
-      },
-    }, res => {
-      let raw = '';
-      res.on('data', c => raw += c);
-      res.on('end', () => {
-        console.log('[Resend] Response:', res.statusCode, raw.slice(0, 400));
-        try {
-          const j = JSON.parse(raw);
-          if (res.statusCode < 300) return resolve({ ok: true, provider: 'resend', id: j.id });
-          reject(new Error(`Resend ${res.statusCode}: ${j.message || j.name || raw}`));
-        } catch(e) { reject(new Error('Resend parse: ' + raw.slice(0, 200))); }
-      });
-    });
-    req.on('error', e => reject(new Error('Resend network: ' + e.code + ' ' + e.message)));
-    req.setTimeout(20000, () => { req.destroy(); reject(new Error('Resend timeout')); });
-    req.write(body);
-    req.end();
-  });
+// Add a professional footer to every email
+// - Gives a reply-to address so leads can respond
+// - Includes unsubscribe notice (required to avoid spam filters)
+// - Makes emails look legitimate not like spam
+function wrapEmailBody(text) {
+  const replyTo = GMAIL_USER || 'your@email.com';
+  return [
+    text.trim(),
+    '',
+    '---',
+    `Reply directly to this email or reach me at: ${replyTo}`,
+    'To unsubscribe from these emails, reply with "unsubscribe".',
+  ].join('\n');
 }
 
-// ── Brevo / Sendinblue (brevo.com — 300/day free, NO domain verification needed) ──
+// ── Brevo (brevo.com — 300/day free, no domain verification needed) ───────────
 function sendViaBrevo(to, subject, text) {
   return new Promise((resolve, reject) => {
-    const senderEmail = GMAIL_USER || 'noreply@example.com';
+    if (!BREVO_KEY) return reject(new Error('BREVO_API_KEY not set'));
+    const senderEmail = GMAIL_USER || 'noreply@gmail.com';
+    const fullText    = wrapEmailBody(text);
     const body = JSON.stringify({
       sender:      { name: FROM_NAME, email: senderEmail },
       to:          [{ email: to }],
+      replyTo:     { email: senderEmail },
       subject,
-      textContent: text,
+      textContent: fullText,
     });
-    console.log('[Brevo] Sending:', { to, from: senderEmail, subject });
+    console.log('[Brevo] Sending to:', to, '| from:', senderEmail);
     const req = https.request({
       hostname: 'api.brevo.com', port: 443, path: '/v3/smtp/email', method: 'POST',
       headers: {
-        'api-key': BREVO_KEY,
-        'Content-Type': 'application/json',
+        'api-key':        BREVO_KEY,
+        'Content-Type':   'application/json',
         'Content-Length': Buffer.byteLength(body),
       },
     }, res => {
@@ -178,41 +154,88 @@ function sendViaBrevo(to, subject, text) {
           const j = JSON.parse(raw);
           if (res.statusCode < 300) return resolve({ ok: true, provider: 'brevo', id: j.messageId });
           reject(new Error(`Brevo ${res.statusCode}: ${j.message || raw}`));
-        } catch(e) { reject(new Error('Brevo parse: ' + raw.slice(0, 200))); }
+        } catch(e) { reject(new Error('Brevo parse error: ' + raw.slice(0, 200))); }
       });
     });
-    req.on('error', e => reject(new Error('Brevo network: ' + e.code + ' ' + e.message)));
+    req.on('error', e => reject(new Error('Brevo network error: ' + e.code + ' ' + e.message)));
     req.setTimeout(20000, () => { req.destroy(); reject(new Error('Brevo timeout')); });
     req.write(body);
     req.end();
   });
 }
 
-// ── Master send — tries Resend first, then Brevo ──────────────────────────────
+// ── Resend (resend.com — 3,000/month free, needs verified domain) ─────────────
+function sendViaResend(to, subject, text) {
+  return new Promise((resolve, reject) => {
+    if (!RESEND_KEY) return reject(new Error('RESEND_API_KEY not set'));
+    // IMPORTANT: fromEmail MUST be a verified domain on your Resend account
+    // onboarding@resend.dev only works if "to" is your own Resend account email
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+    const from      = `${FROM_NAME} <${fromEmail}>`;
+    const fullText  = wrapEmailBody(text);
+    const body = JSON.stringify({
+      from,
+      to:       [to],
+      subject,
+      text:     fullText,
+      reply_to: GMAIL_USER ? [GMAIL_USER] : undefined,
+    });
+    console.log('[Resend] Sending to:', to, '| from:', from);
+    const req = https.request({
+      hostname: 'api.resend.com', port: 443, path: '/emails', method: 'POST',
+      headers: {
+        'Authorization':  `Bearer ${RESEND_KEY}`,
+        'Content-Type':   'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, res => {
+      let raw = '';
+      res.on('data', c => raw += c);
+      res.on('end', () => {
+        console.log('[Resend] Response:', res.statusCode, raw.slice(0, 400));
+        try {
+          const j = JSON.parse(raw);
+          if (res.statusCode < 300) return resolve({ ok: true, provider: 'resend', id: j.id });
+          reject(new Error(`Resend ${res.statusCode}: ${j.message || j.name || raw}`));
+        } catch(e) { reject(new Error('Resend parse error: ' + raw.slice(0, 200))); }
+      });
+    });
+    req.on('error', e => reject(new Error('Resend network error: ' + e.code + ' ' + e.message)));
+    req.setTimeout(20000, () => { req.destroy(); reject(new Error('Resend timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── Master send — Brevo first (no domain needed), then Resend ─────────────────
 async function sendGmail(to, subject, bodyText) {
   const errors = [];
-  if (RESEND_KEY) {
-    try { return await sendViaResend(to, subject, bodyText); }
-    catch(e) { errors.push('Resend: ' + e.message); console.error('[Email]', errors[0]); }
-  }
+
+  // Try Brevo first — works without domain verification
   if (BREVO_KEY) {
     try { return await sendViaBrevo(to, subject, bodyText); }
-    catch(e) { errors.push('Brevo: ' + e.message); console.error('[Email]', errors[errors.length-1]); }
+    catch(e) { errors.push('Brevo: ' + e.message); console.error('[Email] Brevo failed:', e.message); }
   }
-  if (!RESEND_KEY && !BREVO_KEY) {
+
+  // Try Resend as fallback
+  if (RESEND_KEY) {
+    try { return await sendViaResend(to, subject, bodyText); }
+    catch(e) { errors.push('Resend: ' + e.message); console.error('[Email] Resend failed:', e.message); }
+  }
+
+  // No keys set at all
+  if (!BREVO_KEY && !RESEND_KEY) {
     throw new Error(
-      'No email provider set up yet!\n\n' +
-      'OPTION A — Resend (recommended):\n' +
-      '  1. Go to resend.com → Sign up free\n' +
-      '  2. API Keys → Create API Key → copy it\n' +
-      '  3. Railway → Variables → add: RESEND_API_KEY = re_xxxxx\n\n' +
-      'OPTION B — Brevo (no domain needed, 300/day free):\n' +
+      'No email provider configured!\n\n' +
+      'EASIEST SETUP (Brevo — free, no domain needed):\n' +
       '  1. Go to brevo.com → Sign up free\n' +
-      '  2. Settings → API Keys → Generate → copy it\n' +
-      '  3. Railway → Variables → add: BREVO_API_KEY = xkeysib-xxxxx\n\n' +
-      'Then redeploy and try again.'
+      '  2. Top right → SMTP & API → API Keys → Generate new key\n' +
+      '  3. Railway → Variables → add:  BREVO_API_KEY = xkeysib-xxxx\n' +
+      '  4. Also add: GMAIL_USER = your@gmail.com  and  FROM_NAME = Your Name\n' +
+      '  5. Redeploy → test with: test_email to your@gmail.com'
     );
   }
+
   throw new Error('All email providers failed:\n' + errors.join('\n'));
 }
 
