@@ -99,61 +99,121 @@ async function initDB() {
 }
 
 
-// ─── Email via Resend.com HTTP API (port 443 — works on Railway) ──────────────
-// Railway BLOCKS outbound SMTP (ports 465/587). Use Resend instead.
-// Free tier: 3,000 emails/month — get key at resend.com (takes 2 minutes)
+
+// ─── Email sending ────────────────────────────────────────────────────────────
+// Three methods tried in order:
+//   1. Resend API  (RESEND_API_KEY env var)
+//   2. Brevo API   (BREVO_API_KEY env var) — formerly Sendinblue, 300/day free
+//   3. Both missing → clear error message with setup instructions
 const RESEND_KEY = process.env.RESEND_API_KEY || '';
-const GMAIL_USER = process.env.GMAIL_USER || '';  // used as "from" address
+const BREVO_KEY  = process.env.BREVO_API_KEY  || '';
+const GMAIL_USER = process.env.GMAIL_USER     || '';
+const FROM_NAME  = process.env.FROM_NAME      || 'App Dev Agency';
 
-function sendGmail(to, subject, bodyText) {
+// ── Resend (resend.com — 3,000/month free) ────────────────────────────────────
+function sendViaResend(to, subject, text) {
   return new Promise((resolve, reject) => {
-    if (!RESEND_KEY) {
-      return reject(new Error(
-        'Email not configured. Add RESEND_API_KEY to Railway env vars.\n' +
-        'Get a free key at resend.com — takes 2 minutes.'
-      ));
-    }
-
-    // "From" address: if you have a custom domain on Resend use that,
-    // otherwise Resend's shared domain works fine for testing
-    const from = GMAIL_USER
-      ? `Outreach <${GMAIL_USER}>`
-      : 'Outreach <onboarding@resend.dev>';
-
-    const payload = JSON.stringify({ from, to: [to], subject, text: bodyText });
-
+    // Without a verified domain, Resend only allows sending TO your own account email
+    // To send to anyone: verify a domain OR use RESEND_FROM_EMAIL with verified domain
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+    const from = `${FROM_NAME} <${fromEmail}>`;
+    const body = JSON.stringify({
+      from,
+      to: [to],
+      subject,
+      text,
+      reply_to: GMAIL_USER ? [GMAIL_USER] : undefined,
+    });
+    console.log('[Resend] Sending:', { to, from, subject });
     const req = https.request({
-      hostname: 'api.resend.com',
-      port: 443,
-      path: '/emails',
-      method: 'POST',
+      hostname: 'api.resend.com', port: 443, path: '/emails', method: 'POST',
       headers: {
-        'Authorization':  `Bearer ${RESEND_KEY}`,
-        'Content-Type':   'application/json',
-        'Content-Length': Buffer.byteLength(payload),
+        'Authorization': `Bearer ${RESEND_KEY}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
       },
     }, res => {
       let raw = '';
       res.on('data', c => raw += c);
       res.on('end', () => {
+        console.log('[Resend] Response:', res.statusCode, raw.slice(0, 400));
         try {
-          const json = JSON.parse(raw);
-          if (res.statusCode >= 400) {
-            return reject(new Error(`Resend ${res.statusCode}: ${json.message || json.name || raw.slice(0,200)}`));
-          }
-          console.log(`[Email] Sent to ${to} — id: ${json.id}`);
-          resolve({ ok: true, id: json.id });
-        } catch(e) {
-          reject(new Error('Resend response parse error: ' + raw.slice(0, 200)));
-        }
+          const j = JSON.parse(raw);
+          if (res.statusCode < 300) return resolve({ ok: true, provider: 'resend', id: j.id });
+          reject(new Error(`Resend ${res.statusCode}: ${j.message || j.name || raw}`));
+        } catch(e) { reject(new Error('Resend parse: ' + raw.slice(0, 200))); }
       });
     });
-
-    req.on('error', reject);
-    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Resend API timeout')); });
-    req.write(payload);
+    req.on('error', e => reject(new Error('Resend network: ' + e.code + ' ' + e.message)));
+    req.setTimeout(20000, () => { req.destroy(); reject(new Error('Resend timeout')); });
+    req.write(body);
     req.end();
   });
+}
+
+// ── Brevo / Sendinblue (brevo.com — 300/day free, NO domain verification needed) ──
+function sendViaBrevo(to, subject, text) {
+  return new Promise((resolve, reject) => {
+    const senderEmail = GMAIL_USER || 'noreply@example.com';
+    const body = JSON.stringify({
+      sender:      { name: FROM_NAME, email: senderEmail },
+      to:          [{ email: to }],
+      subject,
+      textContent: text,
+    });
+    console.log('[Brevo] Sending:', { to, from: senderEmail, subject });
+    const req = https.request({
+      hostname: 'api.brevo.com', port: 443, path: '/v3/smtp/email', method: 'POST',
+      headers: {
+        'api-key': BREVO_KEY,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, res => {
+      let raw = '';
+      res.on('data', c => raw += c);
+      res.on('end', () => {
+        console.log('[Brevo] Response:', res.statusCode, raw.slice(0, 400));
+        try {
+          const j = JSON.parse(raw);
+          if (res.statusCode < 300) return resolve({ ok: true, provider: 'brevo', id: j.messageId });
+          reject(new Error(`Brevo ${res.statusCode}: ${j.message || raw}`));
+        } catch(e) { reject(new Error('Brevo parse: ' + raw.slice(0, 200))); }
+      });
+    });
+    req.on('error', e => reject(new Error('Brevo network: ' + e.code + ' ' + e.message)));
+    req.setTimeout(20000, () => { req.destroy(); reject(new Error('Brevo timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── Master send — tries Resend first, then Brevo ──────────────────────────────
+async function sendGmail(to, subject, bodyText) {
+  const errors = [];
+  if (RESEND_KEY) {
+    try { return await sendViaResend(to, subject, bodyText); }
+    catch(e) { errors.push('Resend: ' + e.message); console.error('[Email]', errors[0]); }
+  }
+  if (BREVO_KEY) {
+    try { return await sendViaBrevo(to, subject, bodyText); }
+    catch(e) { errors.push('Brevo: ' + e.message); console.error('[Email]', errors[errors.length-1]); }
+  }
+  if (!RESEND_KEY && !BREVO_KEY) {
+    throw new Error(
+      'No email provider set up yet!\n\n' +
+      'OPTION A — Resend (recommended):\n' +
+      '  1. Go to resend.com → Sign up free\n' +
+      '  2. API Keys → Create API Key → copy it\n' +
+      '  3. Railway → Variables → add: RESEND_API_KEY = re_xxxxx\n\n' +
+      'OPTION B — Brevo (no domain needed, 300/day free):\n' +
+      '  1. Go to brevo.com → Sign up free\n' +
+      '  2. Settings → API Keys → Generate → copy it\n' +
+      '  3. Railway → Variables → add: BREVO_API_KEY = xkeysib-xxxxx\n\n' +
+      'Then redeploy and try again.'
+    );
+  }
+  throw new Error('All email providers failed:\n' + errors.join('\n'));
 }
 
 // ─── Lead finder data ─────────────────────────────────────────────────────────
@@ -520,6 +580,14 @@ const TOOLS = [
     description: 'Test the database connection and show table counts. Use this to debug DB issues.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'test_email',
+    description: 'Test email sending — sends a real test email to confirm Resend API is configured correctly.',
+    inputSchema: {
+      type: 'object', required: ['to'],
+      properties: { to: { type: 'string', description: 'Your own email address to send a test to' } },
+    },
+  },
 ];
 
 // ─── Tool runners ─────────────────────────────────────────────────────────────
@@ -545,8 +613,35 @@ async function runTool(name, args) {
       }
       results.database_url_set = !!DATABASE_URL;
       results.resend_configured = !!RESEND_KEY;
-        results.gmail_user = GMAIL_USER || '(not set)';
+      results.brevo_configured  = !!BREVO_KEY;
+      results.gmail_user        = GMAIL_USER || '(not set)';
+      results.from_name         = FROM_NAME;
       return results;
+    }
+
+    case 'test_email': {
+      // Send a real test email so you can confirm the provider works
+      const to = args.to;
+      if (!to || !to.includes('@')) throw new Error('Provide a valid "to" email address');
+      const subject  = 'Test email from Leads MCP ✓';
+      const bodyText = [
+        'Hi,',
+        '',
+        'This is a test email from your Leads MCP server.',
+        'If you received this, email sending is working correctly!',
+        '',
+        `Provider: ${RESEND_KEY ? 'Resend' : BREVO_KEY ? 'Brevo' : 'none configured'}`,
+        `From name: ${FROM_NAME}`,
+        `Sent at: ${new Date().toISOString()}`,
+        '',
+        '-- Leads MCP',
+      ].join('\n');
+      try {
+        const result = await sendGmail(to, subject, bodyText);
+        return { success: true, message: `✓ Test email sent to ${to}`, provider: result.provider, id: result.id };
+      } catch(e) {
+        return { success: false, error: e.message, resend_key_set: !!RESEND_KEY, brevo_key_set: !!BREVO_KEY };
+      }
     }
 
     case 'add_lead': {
